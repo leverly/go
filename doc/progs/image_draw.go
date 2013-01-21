@@ -1,3 +1,5 @@
+// compile
+
 // Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -84,8 +86,8 @@ func ConvAndCircle() {
 
 	// CONV OMIT
 	b := src.Bounds()
-	m := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-	draw.Draw(m, m.Bounds(), src, b.Min, draw.Src)
+	m := image.NewRGBA(b)
+	draw.Draw(m, b, src, b.Min, draw.Src)
 	// STOP OMIT
 
 	p := image.Point{100, 100}

@@ -16,6 +16,7 @@
 #include "defs_GOOS_GOARCH.h"
 #include "os_GOOS.h"
 #include "arch_GOARCH.h"
+#include "malloc.h"
 
 extern byte pclntab[], epclntab[], symtab[], esymtab[];
 
@@ -28,19 +29,37 @@ struct Sym
 //	byte *gotype;
 };
 
+// A dynamically allocated string containing multiple substrings.
+// Individual strings are slices of hugestring.
+static String hugestring;
+static int32 hugestring_len;
+
 // Walk over symtab, calling fn(&s) for each symbol.
 static void
 walksymtab(void (*fn)(Sym*))
 {
 	byte *p, *ep, *q;
 	Sym s;
+	int32 bigend;
 
 	p = symtab;
 	ep = esymtab;
+
+	// Default is big-endian value encoding.
+	// If table begins fe ff ff ff 00 00, little-endian.
+	bigend = 1;
+	if(symtab[0] == 0xfe && symtab[1] == 0xff && symtab[2] == 0xff && symtab[3] == 0xff && symtab[4] == 0x00 && symtab[5] == 0x00) {
+		p += 6;
+		bigend = 0;
+	}
 	while(p < ep) {
 		if(p + 7 > ep)
 			break;
-		s.value = ((uint32)p[0]<<24) | ((uint32)p[1]<<16) | ((uint32)p[2]<<8) | ((uint32)p[3]);
+
+		if(bigend)
+			s.value = ((uint32)p[0]<<24) | ((uint32)p[1]<<16) | ((uint32)p[2]<<8) | ((uint32)p[3]);
+		else
+			s.value = ((uint32)p[3]<<24) | ((uint32)p[2]<<16) | ((uint32)p[1]<<8) | ((uint32)p[0]);
 
 		if(!(p[4]&0x80))
 			break;
@@ -135,14 +154,15 @@ dofunc(Sym *sym)
 
 // put together the path name for a z entry.
 // the f entries have been accumulated into fname already.
-static void
+// returns the length of the path name.
+static int32
 makepath(byte *buf, int32 nbuf, byte *path)
 {
 	int32 n, len;
 	byte *p, *ep, *q;
 
 	if(nbuf <= 0)
-		return;
+		return 0;
 
 	p = buf;
 	ep = buf + nbuf;
@@ -163,6 +183,26 @@ makepath(byte *buf, int32 nbuf, byte *path)
 		runtime·memmove(p, q, len+1);
 		p += len;
 	}
+	return p - buf;
+}
+
+// appends p to hugestring
+static String
+gostringn(byte *p, int32 l)
+{
+	String s;
+
+	if(l == 0)
+		return runtime·emptystring;
+	if(hugestring.str == nil) {
+		hugestring_len += l;
+		return runtime·emptystring;
+	}
+	s.str = hugestring.str + hugestring.len;
+	s.len = l;
+	hugestring.len += s.len;
+	runtime·memmove(s.str, p, l);
+	return s;
 }
 
 // walk symtab accumulating path names for use by pc/ln table.
@@ -181,11 +221,13 @@ dosrcline(Sym *sym)
 	static int32 incstart;
 	static int32 nfunc, nfile, nhist;
 	Func *f;
-	int32 i;
+	int32 i, l;
 
 	switch(sym->symtype) {
 	case 't':
 	case 'T':
+		if(hugestring.str == nil)
+			break;
 		if(runtime·strcmp(sym->name, (byte*)"etext") == 0)
 			break;
 		f = &func[nfunc++];
@@ -200,23 +242,23 @@ dosrcline(Sym *sym)
 	case 'z':
 		if(sym->value == 1) {
 			// entry for main source file for a new object.
-			makepath(srcbuf, sizeof srcbuf, sym->name+1);
+			l = makepath(srcbuf, sizeof srcbuf, sym->name+1);
 			nhist = 0;
 			nfile = 0;
 			if(nfile == nelem(files))
 				return;
-			files[nfile].srcstring = runtime·gostring(srcbuf);
+			files[nfile].srcstring = gostringn(srcbuf, l);
 			files[nfile].aline = 0;
 			files[nfile++].delta = 0;
 		} else {
 			// push or pop of included file.
-			makepath(srcbuf, sizeof srcbuf, sym->name+1);
+			l = makepath(srcbuf, sizeof srcbuf, sym->name+1);
 			if(srcbuf[0] != '\0') {
 				if(nhist++ == 0)
 					incstart = sym->value;
 				if(nhist == 0 && nfile < nelem(files)) {
 					// new top-level file
-					files[nfile].srcstring = runtime·gostring(srcbuf);
+					files[nfile].srcstring = gostringn(srcbuf, l);
 					files[nfile].aline = sym->value;
 					// this is "line 0"
 					files[nfile++].delta = sym->value - 1;
@@ -275,7 +317,7 @@ splitpcln(void)
 			line += *p++;
 		else
 			line -= *p++ - 64;
-		
+
 		// pc, line now match.
 		// Because the state machine begins at pc==entry and line==0,
 		// it can happen - just at the beginning! - that the update may
@@ -297,7 +339,7 @@ splitpcln(void)
 			while(f < ef && pc >= (f+1)->entry);
 			f->pcln.array = p;
 			// pc0 and ln0 are the starting values for
-			// the loop over f->pcln, so pc must be 
+			// the loop over f->pcln, so pc must be
 			// adjusted by the same pcquant update
 			// that we're going to do as we continue our loop.
 			f->pc0 = pc + pcquant;
@@ -323,11 +365,11 @@ runtime·funcline(Func *f, uintptr targetpc)
 	uintptr pc;
 	int32 line;
 	int32 pcquant;
-	
+
 	enum {
 		debug = 0
 	};
-	
+
 	switch(thechar) {
 	case '5':
 		pcquant = 4;
@@ -354,7 +396,7 @@ runtime·funcline(Func *f, uintptr targetpc)
 
 		if(debug && !runtime·panicking)
 			runtime·printf("pc<%p targetpc=%p line=%d\n", pc, targetpc, line);
-		
+
 		// If the pc has advanced too far or we're out of data,
 		// stop and the last known line number.
 		if(pc > targetpc || p >= ep)
@@ -382,7 +424,7 @@ runtime·funcline(Func *f, uintptr targetpc)
 }
 
 void
-runtime·funcline_go(Func *f, uintptr targetpc, String retfile, int32 retline)
+runtime·funcline_go(Func *f, uintptr targetpc, String retfile, intgo retline)
 {
 	retfile = f->src;
 	retline = runtime·funcline(f, targetpc);
@@ -408,10 +450,12 @@ buildfuncs(void)
 	nfname = 0;
 	walksymtab(dofunc);
 
-	// initialize tables
-	func = runtime·mal((nfunc+1)*sizeof func[0]);
+	// Initialize tables.
+	// Can use FlagNoPointers - all pointers either point into sections of the executable
+	// or point into hugestring.
+	func = runtime·mallocgc((nfunc+1)*sizeof func[0], FlagNoPointers, 0, 1);
 	func[nfunc].entry = (uint64)etext;
-	fname = runtime·mal(nfname*sizeof fname[0]);
+	fname = runtime·mallocgc(nfname*sizeof fname[0], FlagNoPointers, 0, 1);
 	nfunc = 0;
 	walksymtab(dofunc);
 
@@ -419,7 +463,13 @@ buildfuncs(void)
 	splitpcln();
 
 	// record src file and line info for each func
-	walksymtab(dosrcline);
+	walksymtab(dosrcline);  // pass 1: determine hugestring_len
+	hugestring.str = runtime·mallocgc(hugestring_len, FlagNoPointers, 0, 0);
+	hugestring.len = 0;
+	walksymtab(dosrcline);  // pass 2: fill and use hugestring
+
+	if(hugestring.len != hugestring_len)
+		runtime·throw("buildfunc: problem in initialization procedure");
 
 	m->nomemprof--;
 }
@@ -482,7 +532,7 @@ static bool
 hasprefix(String s, int8 *p)
 {
 	int32 i;
-	
+
 	for(i=0; i<s.len; i++) {
 		if(p[i] == 0)
 			return 1;
@@ -496,7 +546,7 @@ static bool
 contains(String s, int8 *p)
 {
 	int32 i;
-	
+
 	if(p[0] == 0)
 		return 1;
 	for(i=0; i<s.len; i++) {
@@ -512,7 +562,7 @@ bool
 runtime·showframe(Func *f)
 {
 	static int32 traceback = -1;
-	
+
 	if(traceback < 0)
 		traceback = runtime·gotraceback();
 	return traceback > 1 || contains(f->name, ".") && !hasprefix(f->name, "runtime.");

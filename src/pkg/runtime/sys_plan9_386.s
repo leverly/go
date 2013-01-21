@@ -24,9 +24,19 @@ TEXT runtime·pwrite(SB),7,$0
 	INT     $64
 	RET
 
+TEXT runtime·seek(SB),7,$0
+	MOVL	$39, AX
+	INT	$64
+	CMPL	AX, $-1
+	JNE	4(PC)
+	MOVL	a+0(FP), CX
+	MOVL	AX, 0(CX)
+	MOVL	AX, 4(CX)
+	RET
+
 TEXT runtime·close(SB),7,$0
 	MOVL	$4, AX
-	INT		$64
+	INT	$64
 	RET
 
 TEXT runtime·exits(SB),7,$0
@@ -46,6 +56,21 @@ TEXT runtime·sleep(SB),7,$0
 
 TEXT runtime·plan9_semacquire(SB),7,$0
 	MOVL	$37, AX
+	INT	$64
+	RET
+
+TEXT runtime·plan9_tsemacquire(SB),7,$0
+	MOVL	$52, AX
+	INT	$64
+	RET
+
+TEXT runtime·notify(SB),7,$0
+	MOVL	$28, AX
+	INT	$64
+	RET
+
+TEXT runtime·noted(SB),7,$0
+	MOVL	$29, AX
 	INT	$64
 	RET
 	
@@ -94,4 +119,8 @@ TEXT runtime·rfork(SB),7,$0
 	
 	CALL	SI	// fn()
 	CALL	runtime·exit(SB)
+	RET
+
+// Only used by the 64-bit runtime.
+TEXT runtime·setfpmasks(SB),7,$0
 	RET

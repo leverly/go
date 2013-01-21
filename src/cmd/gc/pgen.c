@@ -29,15 +29,18 @@ compile(Node *fn)
 		throwreturn = sysfunc("throwreturn");
 	}
 
-	if(fn->nbody == nil)
-		return;
+	lno = setlineno(fn);
+
+	if(fn->nbody == nil) {
+		if(pure_go || memcmp(fn->nname->sym->name, "init·", 6) == 0)
+			yyerror("missing function body", fn);
+		goto ret;
+	}
 
 	saveerrors();
 
 	// set up domain for labels
 	clearlabels();
-
-	lno = setlineno(fn);
 
 	curfn = fn;
 	dowidth(curfn->type);
@@ -63,6 +66,10 @@ compile(Node *fn)
 	walk(curfn);
 	if(nerrors != 0)
 		goto ret;
+	if(flag_race)
+		racewalk(curfn);
+	if(nerrors != 0)
+		goto ret;
 
 	continpc = P;
 	breakpc = P;
@@ -79,6 +86,10 @@ compile(Node *fn)
 	afunclit(&ptxt->from);
 
 	ginit();
+
+	for(t=curfn->paramfld; t; t=t->down)
+		gtrack(tracksym(t->type));
+
 	genlist(curfn->enter);
 
 	retpc = nil;
@@ -111,6 +122,7 @@ compile(Node *fn)
 	gclean();
 	if(nerrors != 0)
 		goto ret;
+
 	pc->as = ARET;	// overwrite AEND
 	pc->lineno = lineno;
 

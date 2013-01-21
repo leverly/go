@@ -80,33 +80,23 @@ runtime·futexwakeup(uint32 *addr, uint32 cnt)
 	*(int32*)0x1006 = 0x1006;
 }
 
+extern runtime·sched_getaffinity(uintptr pid, uintptr len, uintptr *buf);
 static int32
 getproccount(void)
 {
-	int32 fd, rd, cnt, cpustrlen;
-	byte *cpustr, *pos, *bufpos;
-	byte buf[256];
+	uintptr buf[16], t;
+	int32 r, cnt, i;
 
-	fd = runtime·open((byte*)"/proc/stat", O_RDONLY|O_CLOEXEC, 0);
-	if(fd == -1)
-		return 1;
 	cnt = 0;
-	bufpos = buf;
-	cpustr = (byte*)"\ncpu";
-	cpustrlen = runtime·findnull(cpustr);
-	for(;;) {
-		rd = runtime·read(fd, bufpos, sizeof(buf)-cpustrlen);
-		if(rd == -1)
-			break;
-		bufpos[rd] = 0;
-		for(pos=buf; pos=runtime·strstr(pos, cpustr); cnt++, pos++) {
-		}
-		if(rd < cpustrlen)
-			break;
-		runtime·memmove(buf, bufpos+rd-cpustrlen+1, cpustrlen-1);
-		bufpos = buf+cpustrlen-1;
+	r = runtime·sched_getaffinity(0, sizeof(buf), buf);
+	if(r > 0)
+	for(i = 0; i < r/sizeof(buf[0]); i++) {
+		t = buf[i];
+		t = t - ((t >> 1) & 0x5555555555555555ULL);
+		t = (t & 0x3333333333333333ULL) + ((t >> 2) & 0x3333333333333333ULL);
+		cnt += (int32)((((t + (t >> 4)) & 0xF0F0F0F0F0F0F0FULL) * 0x101010101010101ULL) >> 56);
 	}
-	runtime·close(fd);
+
 	return cnt ? cnt : 1;
 }
 
@@ -134,7 +124,7 @@ enum
 };
 
 void
-runtime·newosproc(M *m, G *g, void *stk, void (*fn)(void))
+runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
 {
 	int32 ret;
 	int32 flags;
@@ -150,16 +140,16 @@ runtime·newosproc(M *m, G *g, void *stk, void (*fn)(void))
 		| CLONE_THREAD	/* revisit - okay for now */
 		;
 
-	m->tls[0] = m->id;	// so 386 asm can find it
+	mp->tls[0] = mp->id;	// so 386 asm can find it
 	if(0){
 		runtime·printf("newosproc stk=%p m=%p g=%p fn=%p clone=%p id=%d/%d ostk=%p\n",
-			stk, m, g, fn, runtime·clone, m->id, m->tls[0], &m);
+			stk, mp, gp, fn, runtime·clone, mp->id, mp->tls[0], &mp);
 	}
 
 	// Disable signals during clone, so that the new thread starts
 	// with signals disabled.  It will enable them in minit.
 	runtime·rtsigprocmask(SIG_SETMASK, &sigset_all, &oset, sizeof oset);
-	ret = runtime·clone(flags, stk, m, g, fn);
+	ret = runtime·clone(flags, stk, mp, gp, fn);
 	runtime·rtsigprocmask(SIG_SETMASK, &oset, nil, sizeof oset);
 
 	if(ret < 0) {
@@ -186,7 +176,7 @@ runtime·minit(void)
 {
 	// Initialize signal handling.
 	m->gsignal = runtime·malg(32*1024);	// OS X wants >=8K, Linux >=2K
-	runtime·signalstack(m->gsignal->stackguard - StackGuard, 32*1024);
+	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
 	runtime·rtsigprocmask(SIG_SETMASK, &sigset_none, nil, sizeof sigset_none);
 }
 
@@ -271,7 +261,11 @@ static int8 badsignal[] = "runtime: signal received on thread not created by Go.
 // This runs on a foreign stack, without an m or a g.  No stack split.
 #pragma textflag 7
 void
-runtime·badsignal(void)
+runtime·badsignal(int32 sig)
 {
+	if (sig == SIGPROF) {
+		return;  // Ignore SIGPROFs intended for a non-Go thread.
+	}
 	runtime·write(2, badsignal, sizeof badsignal - 1);
+	runtime·exit(1);
 }

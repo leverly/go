@@ -145,7 +145,6 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 	PeSym *sym;
 
 	USED(len);
-	USED(pkg);
 	if(debug['v'])
 		Bprint(&bso, "%5.2f ldpe %s\n", cputime(), pn);
 	
@@ -213,7 +212,7 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 		if(map(obj, sect) < 0)
 			goto bad;
 		
-		name = smprint("%s(%s)", pn, sect->name);
+		name = smprint("%s(%s)", pkg, sect->name);
 		s = lookup(name, version);
 		free(name);
 		switch(sect->sh.Characteristics&(IMAGE_SCN_CNT_UNINITIALIZED_DATA|IMAGE_SCN_CNT_INITIALIZED_DATA|
@@ -300,6 +299,11 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 					rp->add = le64(rsect->base+rp->off);
 					break;
 			}
+			// ld -r could generate multiple section symbols for the
+			// same section but with different values, we have to take
+			// that into account
+			if (obj->pesym[symindex].name[0] == '.')
+					rp->add += obj->pesym[symindex].value;
 		}
 		qsort(r, rsect->sh.NumberOfRelocations, sizeof r[0], rbyoff);
 		

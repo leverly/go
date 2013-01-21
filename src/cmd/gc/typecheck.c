@@ -31,7 +31,6 @@ static void	checkassign(Node*);
 static void	checkassignlist(NodeList*);
 static void	stringtoarraylit(Node**);
 static Node*	resolve(Node*);
-static Type*	getforwtype(Node*);
 
 static	NodeList*	typecheckdefstack;
 
@@ -107,6 +106,27 @@ typekind(Type *t)
 }
 
 /*
+ * sprint_depchain prints a dependency chain
+ * of nodes into fmt.
+ * It is used by typecheck in the case of OLITERAL nodes
+ * to print constant definition loops.
+ */
+static void
+sprint_depchain(Fmt *fmt, NodeList *stack, Node *cur, Node *first)
+{
+	NodeList *l;
+
+	for(l = stack; l; l=l->next) {
+		if(l->n->op == cur->op) {
+			if(l->n != first)
+				sprint_depchain(fmt, l->next, l->n, first);
+			fmtprint(fmt, "\n\t%L: %N uses %N", l->n->lineno, l->n, cur);
+			return;
+		}
+	}
+}
+
+/*
  * type check node *np.
  * replaces *np with a new pointer in some cases.
  * returns the final value of *np as a convenience.
@@ -156,6 +176,24 @@ typecheck(Node **np, int top)
 	}
 
 	if(n->typecheck == 2) {
+		// Typechecking loop. Trying printing a meaningful message,
+		// otherwise a stack trace of typechecking.
+		switch(n->op) {
+		case ONAME:
+			// We can already diagnose variables used as types.
+			if((top & (Erv|Etype)) == Etype)
+				yyerror("%N is not a type", n);
+			break;
+		case OLITERAL:
+			if((top & (Erv|Etype)) == Etype) {
+				yyerror("%N is not a type", n);
+				break;
+			}
+			fmtstrinit(&fmt);
+			sprint_depchain(&fmt, tcstack, n, n);
+			yyerrorl(n->lineno, "constant definition loop%s", fmtstrflush(&fmt));
+			break;
+		}
 		if(nsavederrors+nerrors == 0) {
 			fmtstrinit(&fmt);
 			for(l=tcstack; l; l=l->next)
@@ -166,7 +204,7 @@ typecheck(Node **np, int top)
 		return n;
 	}
 	n->typecheck = 2;
-	
+
 	if(tcfree != nil) {
 		l = tcfree;
 		tcfree = l->next;
@@ -207,6 +245,12 @@ callrecv(Node *n)
 	case OCALLINTER:
 	case OCALLFUNC:
 	case ORECV:
+	case OCAP:
+	case OLEN:
+	case OCOPY:
+	case ONEW:
+	case OAPPEND:
+	case ODELETE:
 		return 1;
 	}
 
@@ -237,7 +281,7 @@ typecheck1(Node **np, int top)
 	Node *n, *l, *r;
 	NodeList *args;
 	int ok, ntop;
-	Type *t, *tp, *ft, *missing, *have, *badtype;
+	Type *t, *tp, *missing, *have, *badtype;
 	Val v;
 	char *why;
 	
@@ -248,10 +292,6 @@ typecheck1(Node **np, int top)
 			yyerror("use of builtin %S not in function call", n->sym);
 			goto error;
 		}
-
-		// a dance to handle forward-declared recursive pointer types.
-		if(n->op == OTYPE && (ft = getforwtype(n->ntype)) != T)
-			defertypecopy(n, ft);
 
 		typecheckdef(n);
 		n->realtype = n->type;
@@ -356,8 +396,10 @@ reswitch:
 			if(t->bound < 0) {
 				yyerror("array bound must be non-negative");
 				goto error;
-			} else
-				overflow(v, types[TINT]);
+			} else if(doesoverflow(v, types[TINT])) {
+				yyerror("array bound is too large"); 
+				goto error;
+			}
 		}
 		typecheck(&r, Etype);
 		if(r->type == T)
@@ -401,7 +443,7 @@ reswitch:
 		ok |= Etype;
 		n->op = OTYPE;
 		n->type = tostruct(n->list);
-		if(n->type == T)
+		if(n->type == T || n->type->broke)
 			goto error;
 		n->list = nil;
 		break;
@@ -441,8 +483,11 @@ reswitch:
 			goto ret;
 		}
 		if(!isptr[t->etype]) {
-			yyerror("invalid indirect of %lN", n->left);
-			goto error;
+			if(top & (Erv | Etop)) {
+				yyerror("invalid indirect of %lN", n->left);
+				goto error;
+			}
+			goto ret;
 		}
 		ok |= Erv;
 		n->type = t->type;
@@ -572,7 +617,10 @@ reswitch:
 				n->left = l;
 				n->right = r;
 			}
-		}
+		// non-comparison operators on ideal bools should make them lose their ideal-ness
+		} else if(t == idealbool)
+			t = types[TBOOL];
+
 		if(et == TSTRING) {
 			if(iscmp[n->op]) {
 				n->etype = n->op;
@@ -740,14 +788,20 @@ reswitch:
 		}
 		if(n->type != T && n->type->etype != TINTER)
 		if(!implements(n->type, t, &missing, &have, &ptr)) {
-			if(have)
-				yyerror("impossible type assertion: %lN cannot have dynamic type %T"
-					" (wrong type for %S method)\n\thave %S%hT\n\twant %S%hT",
-					l, n->type, missing->sym, have->sym, have->type,
-					missing->sym, missing->type);
+			if(have && have->sym == missing->sym)
+				yyerror("impossible type assertion:\n\t%T does not implement %T (wrong type for %S method)\n"
+					"\t\thave %S%hhT\n\t\twant %S%hhT", n->type, t, missing->sym,
+					have->sym, have->type, missing->sym, missing->type);
+			else if(ptr)
+				yyerror("impossible type assertion:\n\t%T does not implement %T (%S method requires pointer receiver)",
+					n->type, t, missing->sym);
+			else if(have)
+				yyerror("impossible type assertion:\n\t%T does not implement %T (missing %S method)\n"
+					"\t\thave %S%hhT\n\t\twant %S%hhT", n->type, t, missing->sym,
+					have->sym, have->type, missing->sym, missing->type);
 			else
-				yyerror("impossible type assertion: %lN cannot have dynamic type %T"
-					" (missing %S method)", l, n->type, missing->sym);
+				yyerror("impossible type assertion:\n\t%T does not implement %T (missing %S method)",
+					n->type, t, missing->sym);
 			goto error;
 		}
 		goto ret;
@@ -769,9 +823,22 @@ reswitch:
 
 		case TARRAY:
 			defaultlit(&n->right, T);
-			if(n->right->type != T && !isint[n->right->type->etype])
-				yyerror("non-integer array index %N", n->right);
 			n->type = t->type;
+			if(n->right->type != T && !isint[n->right->type->etype]) {
+				yyerror("non-integer array index %N", n->right);
+				break;
+			}
+			if(n->right->op == OLITERAL) {
+			       	if(mpgetfix(n->right->val.u.xval) < 0) {
+					why = isfixedarray(t) ? "array" : "slice";
+					yyerror("invalid %s index %N (index must be non-negative)", why, n->right);
+				} else if(isfixedarray(t) && t->bound > 0 && mpgetfix(n->right->val.u.xval) >= t->bound)
+					yyerror("invalid array index %N (out of bounds for %d-element array)", n->right, t->bound);
+				else if(mpcmpfixfix(n->right->val.u.xval, maxintval[TINT]) > 0) {
+					why = isfixedarray(t) ? "array" : "slice";
+					yyerror("invalid %s index %N (index too large)", why, n->right);
+				}
+			}
 			break;
 
 		case TMAP:
@@ -848,7 +915,8 @@ reswitch:
 		defaultlit(&n->left, T);
 		defaultlit(&n->right->left, T);
 		defaultlit(&n->right->right, T);
-		if(isfixedarray(n->left->type)) {
+		l = n->left;
+		if(isfixedarray(l->type)) {
 			if(!islvalue(n->left)) {
 				yyerror("invalid operation %N (slice of unaddressable value)", n);
 				goto error;
@@ -856,6 +924,26 @@ reswitch:
 			n->left = nod(OADDR, n->left, N);
 			n->left->implicit = 1;
 			typecheck(&n->left, Erv);
+			l = n->left;
+		}
+		if((t = l->type) == T)
+			goto error;
+		tp = nil;
+		if(istype(t, TSTRING)) {
+			n->type = t;
+			n->op = OSLICESTR;
+		} else if(isptr[t->etype] && isfixedarray(t->type)) {
+			tp = t->type;
+			n->type = typ(TARRAY);
+			n->type->type = tp->type;
+			n->type->bound = -1;
+			dowidth(n->type);
+			n->op = OSLICEARR;
+		} else if(isslice(t)) {
+			n->type = t;
+		} else {
+			yyerror("cannot slice %N (type %T)", l, t);
+			goto error;
 		}
 		if(n->right->left != N) {
 			if((t = n->right->left->type) == T)
@@ -863,6 +951,18 @@ reswitch:
 			if(!isint[t->etype]) {
 				yyerror("invalid slice index %N (type %T)", n->right->left, t);
 				goto error;
+			}
+			if(n->right->left->op == OLITERAL) {
+				if(mpgetfix(n->right->left->val.u.xval) < 0) {
+					yyerror("invalid slice index %N (index must be non-negative)", n->right->left);
+					goto error;
+				} else if(tp != nil && tp->bound > 0 && mpgetfix(n->right->left->val.u.xval) > tp->bound) {
+					yyerror("invalid slice index %N (out of bounds for %d-element array)", n->right->left, tp->bound);
+					goto error;
+				} else if(mpcmpfixfix(n->right->left->val.u.xval, maxintval[TINT]) > 0) {
+					yyerror("invalid slice index %N (index too large)", n->right->left);
+					goto error;
+				}
 			}
 		}
 		if(n->right->right != N) {
@@ -872,29 +972,28 @@ reswitch:
 				yyerror("invalid slice index %N (type %T)", n->right->right, t);
 				goto error;
 			}
+			if(n->right->right->op == OLITERAL) {
+				if(mpgetfix(n->right->right->val.u.xval) < 0) {
+					yyerror("invalid slice index %N (index must be non-negative)", n->right->right);
+					goto error;
+				} else if(tp != nil && tp->bound > 0 && mpgetfix(n->right->right->val.u.xval) > tp->bound) {
+					yyerror("invalid slice index %N (out of bounds for %d-element array)", n->right->right, tp->bound);
+					goto error;
+				} else if(mpcmpfixfix(n->right->right->val.u.xval, maxintval[TINT]) > 0) {
+					yyerror("invalid slice index %N (index too large)", n->right->right);
+					goto error;
+				}
+			}
 		}
-		l = n->left;
-		if((t = l->type) == T)
+		if(n->right->left != N
+		   && n->right->right != N
+		   && n->right->left->op == OLITERAL
+		   && n->right->right->op == OLITERAL
+		   && mpcmpfixfix(n->right->left->val.u.xval, n->right->right->val.u.xval) > 0) {
+			yyerror("inverted slice index %N > %N", n->right->left, n->right->right);
 			goto error;
-		if(istype(t, TSTRING)) {
-			n->type = t;
-			n->op = OSLICESTR;
-			goto ret;
 		}
-		if(isptr[t->etype] && isfixedarray(t->type)) {
-			n->type = typ(TARRAY);
-			n->type->type = t->type->type;
-			n->type->bound = -1;
-			dowidth(n->type);
-			n->op = OSLICEARR;
-			goto ret;
-		}
-		if(isslice(t)) {
-			n->type = t;
-			goto ret;
-		}
-		yyerror("cannot slice %N (type %T)", l, t);
-		goto error;
+		goto ret;
 
 	/*
 	 * call and call like
@@ -934,7 +1033,7 @@ reswitch:
 			goto doconv;
 		}
 
-		if(count(n->list) == 1)
+		if(count(n->list) == 1 && !n->isddd)
 			typecheck(&n->list->n, Erv | Efnstruct);
 		else
 			typechecklist(n->list, Erv);
@@ -1140,6 +1239,10 @@ reswitch:
 			goto error;
 		n->type = t;
 		if(!isslice(t)) {
+			if(isconst(args->n, CTNIL)) {
+				yyerror("first argument to append must be typed slice; have untyped nil", t);
+				goto error;
+			}
 			yyerror("first argument to append must be slice; have %lT", t);
 			goto error;
 		}
@@ -1531,9 +1634,7 @@ ret:
 		}
 	}
 
-	// TODO(rsc): should not need to check importpkg,
-	// but reflect mentions unsafe.Pointer.
-	if(safemode && !incannedimport && !importpkg && t && t->etype == TUNSAFEPTR)
+	if(safemode && !incannedimport && !importpkg && !compiling_wrappers && t && t->etype == TUNSAFEPTR)
 		yyerror("cannot use unsafe.Pointer");
 
 	evconst(n);
@@ -1683,7 +1784,7 @@ lookdot1(Node *errnode, Sym *s, Type *t, Type *f, int dostrcmp)
 static int
 looktypedot(Node *n, Type *t, int dostrcmp)
 {
-	Type *f1, *f2, *tt;
+	Type *f1, *f2;
 	Sym *s;
 	
 	s = n->right->sym;
@@ -1693,8 +1794,6 @@ looktypedot(Node *n, Type *t, int dostrcmp)
 		if(f1 == T)
 			return 0;
 
-		if(f1->width == BADWIDTH)
-			fatal("lookdot badwidth %T %p", f1, f1);
 		n->right = methodname(n->right, t);
 		n->xoffset = f1->width;
 		n->type = f1->type;
@@ -1702,11 +1801,9 @@ looktypedot(Node *n, Type *t, int dostrcmp)
 		return 1;
 	}
 
-	tt = t;
-	if(t->sym == S && isptr[t->etype])
-		tt = t->type;
-
-	f2 = methtype(tt, 0);
+	// Find the base type: methtype will fail if t
+	// is not of the form T or *T.
+	f2 = methtype(t, 0);
 	if(f2 == T)
 		return 0;
 
@@ -1770,6 +1867,7 @@ lookdot(Node *n, Type *t, int dostrcmp)
 			fatal("lookdot badwidth %T %p", f1, f1);
 		n->xoffset = f1->width;
 		n->type = f1->type;
+		n->paramfld = f1;
 		if(t->etype == TINTER) {
 			if(isptr[n->left->type->etype]) {
 				n->left = nod(OIND, n->left, N);	// implicitstar
@@ -2133,7 +2231,7 @@ typecheckcomplit(Node **np)
 	Node *l, *n, *r, **hash;
 	NodeList *ll;
 	Type *t, *f;
-	Sym *s;
+	Sym *s, *s1;
 	int32 lno;
 	ulong nhash;
 	Node *autohash[101];
@@ -2299,9 +2397,11 @@ typecheckcomplit(Node **np)
 				// Sym might have resolved to name in other top-level
 				// package, because of import dot.  Redirect to correct sym
 				// before we do the lookup.
-				if(s->pkg != localpkg && exportname(s->name))
-					s = lookup(s->name);
-
+				if(s->pkg != localpkg && exportname(s->name)) {
+					s1 = lookup(s->name);
+					if(s1->origpkg == s->pkg)
+						s = s1;
+				}
 				f = lookdot1(nil, s, t, t->type, 0);
 				if(f == nil) {
 					yyerror("unknown %T field '%S' in struct literal", t, s);
@@ -2528,7 +2628,6 @@ typecheckas2(Node *n)
 			goto common;
 		case ORECV:
 			n->op = OAS2RECV;
-			n->right = n->rlist->n;
 			goto common;
 		case ODOTTYPE:
 			n->op = OAS2DOTTYPE;
@@ -2573,7 +2672,7 @@ typecheckfunc(Node *n)
 	t->nname = n->nname;
 	rcvr = getthisx(t)->type;
 	if(rcvr != nil && n->shortname != N && !isblank(n->shortname))
-		addmethod(n->shortname->sym, t, 1);
+		addmethod(n->shortname->sym, t, 1, n->nname->nointerface);
 }
 
 static void
@@ -2612,26 +2711,6 @@ stringtoarraylit(Node **np)
 	*np = nn;
 }
 
-static Type*
-getforwtype(Node *n)
-{
-	Node *f1, *f2;
-
-	for(f2=n; ; n=n->ntype) {
-		if((n = resolve(n)) == N || n->op != OTYPE)
-			return T;
-
-		if(n->type != T && n->type->etype == TFORW)
-			return n->type;
-
-		// Check for ntype cycle.
-		if((f2 = resolve(f2)) != N && (f1 = resolve(f2->ntype)) != N) {
-			f2 = resolve(f1->ntype);
-			if(f1 == n || f2 == n)
-				return T;
-		}
-	}
-}
 
 static int ntypecheckdeftype;
 static NodeList *methodqueue;
@@ -2669,49 +2748,24 @@ domethod(Node *n)
 	checkwidth(n->type);
 }
 
-typedef struct NodeTypeList NodeTypeList;
-struct NodeTypeList {
-	Node *n;
-	Type *t;
-	NodeTypeList *next;
-};
-
-static	NodeTypeList	*dntq;
-static	NodeTypeList	*dntend;
-
-void
-defertypecopy(Node *n, Type *t)
-{
-	NodeTypeList *ntl;
-
-	if(n == N || t == T)
-		return;
-
-	ntl = mal(sizeof *ntl);
-	ntl->n = n;
-	ntl->t = t;
-	ntl->next = nil;
-
-	if(dntq == nil)
-		dntq = ntl;
-	else
-		dntend->next = ntl;
-
-	dntend = ntl;
-}
-
-void
-resumetypecopy(void)
-{
-	NodeTypeList *l;
-
-	for(l=dntq; l; l=l->next)
-		copytype(l->n, l->t);
-}
+static NodeList *mapqueue;
 
 void
 copytype(Node *n, Type *t)
 {
+	int maplineno, embedlineno, lno;
+	NodeList *l;
+
+	if(t->etype == TFORW) {
+		// This type isn't computed yet; when it is, update n.
+		t->copyto = list(t->copyto, n);
+		return;
+	}
+
+	maplineno = n->type->maplineno;
+	embedlineno = n->type->embedlineno;
+
+	l = n->type->copyto;
 	*n->type = *t;
 
 	t = n->type;
@@ -2724,12 +2778,32 @@ copytype(Node *n, Type *t)
 	t->nod = N;
 	t->printed = 0;
 	t->deferwidth = 0;
+	t->copyto = nil;
+	
+	// Update nodes waiting on this type.
+	for(; l; l=l->next)
+		copytype(l->n, t);
+
+	// Double-check use of type as embedded type.
+	lno = lineno;
+	if(embedlineno) {
+		lineno = embedlineno;
+		if(isptr[t->etype])
+			yyerror("embedded type cannot be a pointer");
+	}
+	lineno = lno;
+	
+	// Queue check for map until all the types are done settling.
+	if(maplineno) {
+		t->maplineno = maplineno;
+		mapqueue = list(mapqueue, n);
+	}
 }
 
 static void
 typecheckdeftype(Node *n)
 {
-	int maplineno, embedlineno, lno;
+	int lno;
 	Type *t;
 	NodeList *l;
 
@@ -2741,6 +2815,7 @@ typecheckdeftype(Node *n)
 	typecheck(&n->ntype, Etype);
 	if((t = n->ntype->type) == T) {
 		n->diag = 1;
+		n->type = T;
 		goto ret;
 	}
 	if(n->type == T) {
@@ -2748,25 +2823,11 @@ typecheckdeftype(Node *n)
 		goto ret;
 	}
 
-	maplineno = n->type->maplineno;
-	embedlineno = n->type->embedlineno;
-
 	// copy new type and clear fields
 	// that don't come along.
 	// anything zeroed here must be zeroed in
 	// typedcl2 too.
 	copytype(n, t);
-
-	// double-check use of type as map key.
-	if(maplineno) {
-		lineno = maplineno;
-		maptype(n->type, types[TBOOL]);
-	}
-	if(embedlineno) {
-		lineno = embedlineno;
-		if(isptr[t->etype])
-			yyerror("embedded type cannot be a pointer");
-	}
 
 ret:
 	lineno = lno;
@@ -2780,6 +2841,11 @@ ret:
 			for(; l; l=l->next)
 				domethod(l->n);
 		}
+		for(l=mapqueue; l; l=l->next) {
+			lineno = l->n->type->maplineno;
+			maptype(l->n->type, types[TBOOL]);
+		}
+		lineno = lno;
 	}
 	ntypecheckdeftype--;
 }

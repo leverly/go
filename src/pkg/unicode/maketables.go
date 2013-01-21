@@ -41,7 +41,7 @@ func main() {
 var dataURL = flag.String("data", "", "full URL for UnicodeData.txt; defaults to --url/UnicodeData.txt")
 var casefoldingURL = flag.String("casefolding", "", "full URL for CaseFolding.txt; defaults to --url/CaseFolding.txt")
 var url = flag.String("url",
-	"http://www.unicode.org/Public/6.0.0/ucd/",
+	"http://www.unicode.org/Public/6.2.0/ucd/",
 	"URL of Unicode database directory")
 var tablelist = flag.String("tables",
 	"all",
@@ -367,7 +367,7 @@ func loadCasefold() {
 			}
 			logger.Fatal(err)
 		}
-		if line[0] == '#' {
+		if line[0] == '#' || len(strings.TrimSpace(line)) == 0 {
 			continue
 		}
 		field := strings.Split(line, "; ")
@@ -488,7 +488,7 @@ func printCategories() {
 			func(code rune) bool { return chars[code].category == name })
 	}
 	decl.Sort()
-	fmt.Println("// The following variables are of type *RangeTable:")
+	fmt.Println("// These variables have type *RangeTable.")
 	fmt.Println("var (")
 	for _, d := range decl {
 		fmt.Print(d)
@@ -503,6 +503,7 @@ const format = "\t\t{0x%04x, 0x%04x, %d},\n"
 func dumpRange(header string, inCategory Op) {
 	fmt.Print(header)
 	next := rune(0)
+	latinOffset := 0
 	fmt.Print("\tR16: []Range16{\n")
 	// one Range for each iteration
 	count := &range16Count
@@ -546,11 +547,17 @@ func dumpRange(header string, inCategory Op) {
 				break
 			}
 		}
+		if uint32(hi) <= unicode.MaxLatin1 {
+			latinOffset++
+		}
 		size, count = printRange(uint32(lo), uint32(hi), uint32(stride), size, count)
 		// next range: start looking where this range ends
 		next = hi + 1
 	}
 	fmt.Print("\t},\n")
+	if latinOffset > 0 {
+		fmt.Printf("\tLatinOffset: %d,\n", latinOffset)
+	}
 	fmt.Print("}\n\n")
 }
 
@@ -760,23 +767,34 @@ func printScriptOrProperty(doProps bool) {
 		}
 		ndecl++
 		fmt.Printf("var _%s = &RangeTable {\n", name)
-		fmt.Print("\tR16: []Range16{\n")
 		ranges := foldAdjacent(table[name])
+		fmt.Print("\tR16: []Range16{\n")
 		size := 16
 		count := &range16Count
 		for _, s := range ranges {
 			size, count = printRange(s.Lo, s.Hi, s.Stride, size, count)
 		}
 		fmt.Print("\t},\n")
+		if off := findLatinOffset(ranges); off > 0 {
+			fmt.Printf("\tLatinOffset: %d,\n", off)
+		}
 		fmt.Print("}\n\n")
 	}
 	decl.Sort()
-	fmt.Println("// The following variables are of type *RangeTable:")
+	fmt.Println("// These variables have type *RangeTable.")
 	fmt.Println("var (")
 	for _, d := range decl {
 		fmt.Print(d)
 	}
 	fmt.Print(")\n\n")
+}
+
+func findLatinOffset(ranges []unicode.Range32) int {
+	i := 0
+	for i < len(ranges) && ranges[i].Hi <= unicode.MaxLatin1 {
+		i++
+	}
+	return i
 }
 
 const (
@@ -1022,6 +1040,8 @@ func printLatinProperties() {
 			property = "0"
 		case "Ll":
 			property = "pLl | pp"
+		case "Lo":
+			property = "pLo | pp"
 		case "Lu":
 			property = "pLu | pp"
 		case "Nd", "No":

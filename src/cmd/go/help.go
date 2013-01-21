@@ -61,7 +61,7 @@ var helpRemote = &Command{
 	Short:     "remote import path syntax",
 	Long: `
 
-An import path (see 'go help importpath') denotes a package
+An import path (see 'go help packages') denotes a package
 stored in the local file system.  Certain import paths also
 describe how to obtain the source code for the package using
 a revision control system.
@@ -138,7 +138,7 @@ The meta tag has the form:
 
 	<meta name="go-import" content="import-prefix vcs repo-root">
 
-The import-prefix is the import path correponding to the repository
+The import-prefix is the import path corresponding to the repository
 root. It must be a prefix or an exact match of the package being
 fetched with "go get". If it's not an exact match, another http
 request is made at the prefix to verify the <meta> tags match.
@@ -186,7 +186,7 @@ On Unix, the value is a colon-separated string.
 On Windows, the value is a semicolon-separated string.
 On Plan 9, the value is a list.
 
-GOPATH must be set to build and install packages outside the
+GOPATH must be set to get, build and install packages outside the
 standard Go tree.
 
 Each directory listed in GOPATH must have a prescribed structure:

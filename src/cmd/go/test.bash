@@ -76,6 +76,12 @@ if ! ./testgo test ./testdata/testimport; then
 	ok=false
 fi
 
+# Test installation with relative imports.
+if ! ./testgo test -i ./testdata/testimport; then
+    echo "go test -i ./testdata/testimport failed"
+    ok=false
+fi
+
 # Test tests with relative imports in packages synthesized
 # from Go files named on the command line.
 if ! ./testgo test ./testdata/testimport/*.go; then
@@ -118,6 +124,66 @@ elif ! test -x testdata/bin1/helloworld; then
 	echo "go install testdata/src/go-cmd-test/helloworld.go did not write testdata/bin1/helloworld"
 	ok=false
 fi
+
+# Reject relative paths in GOPATH.
+if GOPATH=. ./testgo build testdata/src/go-cmd-test/helloworld.go; then
+    echo 'GOPATH="." go build should have failed, did not'
+    ok=false
+fi
+
+if GOPATH=:$(pwd)/testdata:. ./testgo build go-cmd-test; then
+    echo 'GOPATH=":$(pwd)/testdata:." go build should have failed, did not'
+    ok=false
+fi
+
+# issue 4104
+if [ $(./testgo test fmt fmt fmt fmt fmt | wc -l) -ne 1 ] ; then
+    echo 'go test fmt fmt fmt fmt fmt tested the same package multiple times'
+    ok=false
+fi
+
+# ensure that output of 'go list' is consistent between runs
+./testgo list std > test_std.list
+if ! ./testgo list std | cmp -s test_std.list - ; then
+	echo "go list std ordering is inconsistent"
+	ok=false
+fi
+rm -f test_std.list
+
+# issue 4096. Validate the output of unsucessful go install foo/quxx 
+if [ $(./testgo install 'foo/quxx' 2>&1 | grep -c 'cannot find package "foo/quxx" in any of') -ne 1 ] ; then
+	echo 'go install foo/quxx expected error: .*cannot find package "foo/quxx" in any of'
+	ok=false
+fi 
+# test GOROOT search failure is reported
+if [ $(./testgo install 'foo/quxx' 2>&1 | egrep -c 'foo/quxx \(from \$GOROOT\)$') -ne 1 ] ; then
+        echo 'go install foo/quxx expected error: .*foo/quxx (from $GOROOT)'
+        ok=false
+fi
+# test multiple GOPATH entries are reported separately
+if [ $(GOPATH=$(pwd)/testdata/a:$(pwd)/testdata/b ./testgo install 'foo/quxx' 2>&1 | egrep -c 'testdata/./src/foo/quxx') -ne 2 ] ; then
+        echo 'go install foo/quxx expected error: .*testdata/a/src/foo/quxx (from $GOPATH)\n.*testdata/b/src/foo/quxx'
+        ok=false
+fi
+# test (from $GOPATH) annotation is reported for the first GOPATH entry
+if [ $(GOPATH=$(pwd)/testdata/a:$(pwd)/testdata/b ./testgo install 'foo/quxx' 2>&1 | egrep -c 'testdata/a/src/foo/quxx \(from \$GOPATH\)$') -ne 1 ] ; then
+        echo 'go install foo/quxx expected error: .*testdata/a/src/foo/quxx (from $GOPATH)'
+        ok=false
+fi
+# but not on the second
+if [ $(GOPATH=$(pwd)/testdata/a:$(pwd)/testdata/b ./testgo install 'foo/quxx' 2>&1 | egrep -c 'testdata/b/src/foo/quxx$') -ne 1 ] ; then
+        echo 'go install foo/quxx expected error: .*testdata/b/src/foo/quxx'
+        ok=false
+fi
+# test missing GOPATH is reported
+if [ $(GOPATH= ./testgo install 'foo/quxx' 2>&1 | egrep -c '\(\$GOPATH not set\)$') -ne 1 ] ; then
+        echo 'go install foo/quxx expected error: ($GOPATH not set)'
+        ok=false
+fi
+
+# clean up
+rm -rf testdata/bin testdata/bin1
+rm -f testgo
 
 if $ok; then
 	echo PASS

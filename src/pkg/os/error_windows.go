@@ -7,7 +7,12 @@ package os
 import "syscall"
 
 func isExist(err error) bool {
-	if pe, ok := err.(*PathError); ok {
+	switch pe := err.(type) {
+	case nil:
+		return false
+	case *PathError:
+		err = pe.Err
+	case *LinkError:
 		err = pe.Err
 	}
 	return err == syscall.ERROR_ALREADY_EXISTS ||
@@ -15,7 +20,12 @@ func isExist(err error) bool {
 }
 
 func isNotExist(err error) bool {
-	if pe, ok := err.(*PathError); ok {
+	switch pe := err.(type) {
+	case nil:
+		return false
+	case *PathError:
+		err = pe.Err
+	case *LinkError:
 		err = pe.Err
 	}
 	return err == syscall.ERROR_FILE_NOT_FOUND ||
@@ -23,8 +33,13 @@ func isNotExist(err error) bool {
 }
 
 func isPermission(err error) bool {
-	if pe, ok := err.(*PathError); ok {
+	switch pe := err.(type) {
+	case nil:
+		return false
+	case *PathError:
+		err = pe.Err
+	case *LinkError:
 		err = pe.Err
 	}
-	return err == ErrPermission
+	return err == syscall.ERROR_ACCESS_DENIED || err == ErrPermission
 }

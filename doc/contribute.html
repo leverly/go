@@ -7,7 +7,7 @@
 <p>
 This document explains how to contribute changes to the Go project.
 It assumes you have installed Go using the
-<a href="/doc/install">installation instructions</a> and
+<a href="/doc/install/source">installation instructions</a> and
 have <a href="code.html">written and tested your code</a>.
 (Note that the <code>gccgo</code> frontend lives elsewhere;
 see <a href="gccgo_contribute.html">Contributing to gccgo</a>.)
@@ -46,23 +46,12 @@ tree to make sure the changes don't break other packages or programs:
 
 <pre>
 cd $GOROOT/src
-./all.bash
+./all.bash    # On Windows, run all.bat
 </pre>
 
 <p>
-The final line printed by <code>make all</code> should be of the form:
+After running for a while, the command should print "<code>ALL TESTS PASSED</code>".
 </p>
-
-<pre>
-<i>N</i> known bugs; 0 unexpected bugs
-</pre>
-
-<p>
-The value of <i>N</i> varies over time, but the line must
-say &ldquo;<code>0 unexpected bugs</code>&rdquo; and must not
-add &ldquo;<code>test output differs</code>.&rdquo;
-</p>
-
 
 <h2 id="Code_review">Code review</h2>
 
@@ -104,27 +93,26 @@ the code review extension disables the standard <code>hg commit</code>
 command.
 </p>
 
-<p>
-Mercurial power users: if you prefer to use the Mercurial Queues extension, see
-<a href="codereview_with_mq.html">Using Mercurial Queues with Codereview</a>.
-</p>
-
 <h3>Configure the extension</h3>
 
 <p>Edit <code>$GOROOT/.hg/hgrc</code> to add:</p>
 
 <pre>
 [extensions]
-codereview = YOUR_GO_ROOT/lib/codereview/codereview.py
+codereview = $GOROOT/lib/codereview/codereview.py
 
 [ui]
 username = Your Name &lt;you@server.dom&gt;
 </pre>
 
-<p>Replace YOUR_GO_ROOT with the value of <code>$GOROOT</code>.
-The Mercurial configuration file format does not allow environment variable substitution.
+<p>
 The <code>username</code> information will not be used unless
 you are a committer (see below), but Mercurial complains if it is missing.
+</p>
+
+<p>
+After adding the extension, <code>hg help codereview</code>
+will show documentation for its commands.
 </p>
 
 <h3>Log in to the code review site.</h3>
@@ -133,12 +121,14 @@ you are a committer (see below), but Mercurial complains if it is missing.
 The code review server uses a Google Account to authenticate.
 (If you can use the account to
 <a href="https://www.google.com/accounts/Login?hl=en&amp;continue=http://www.google.com/">sign in at google.com</a>,
-you can use it to sign in to the code review server.
+you can use it to sign in to the code review server.)
 The email address you use on the Code Review site
 will be recorded in the <a href="http://code.google.com/p/go/source/list">Mercurial change log</a>
 and in the <a href="/CONTRIBUTORS"><code>CONTRIBUTORS</code></a> file.
 You can <a href="https://www.google.com/accounts/NewAccount">create a Google Account</a>
 associated with any address where you receive email.
+If you've enabled the two-step verification feature, don't forget to generate an
+application-specific password and use that when prompted for a password.
 </p>
 
 <pre>
@@ -162,6 +152,19 @@ Many people prefer to set the Context option to
 can use that nickname as a shorthand for naming reviewers and the CC list.
 For example, <code>rsc</code> is an alias for <code>rsc@golang.org</code>.
 </p>
+
+<h3>Switch to the default branch</h3>
+
+<p>
+Most Go installations use a release branch, but new changes should
+only be made to the default branch. (They may be applied later to a release
+branch as part of the release process.)
+Before making a change, make sure you use the default branch:
+</p>
+
+<pre>
+$ hg update default
+</pre>
 
 <h3>Make a change</h3>
 
@@ -263,6 +266,8 @@ The special sentence &ldquo;Fixes issue 159.&rdquo; associates
 the change with issue 159 in the <a href="http://code.google.com/p/go/issues/list">Go issue tracker</a>.
 When this change is eventually submitted, the issue
 tracker will automatically mark the issue as fixed.
+(These conventions are described in detail by the
+<a href="http://code.google.com/p/support/wiki/IssueTracker#Integration_with_version_control">Google Project Hosting Issue Tracker documentation</a>.)
 </p>
 
 <p>
@@ -278,8 +283,15 @@ CL created: http://codereview.appspot.com/99999
 </pre>
 
 <p>
-If you need to re-edit the change description,
-run <code>hg change 99999</code>.
+If you need to re-edit the change description, or change the files included in the CL,
+run <code>hg change 99999</code>. Alternatively, you can use <code>hg file 99999 somefile</code>
+to add <code>somefile</code> to CL 99999, and use <code>hg file -d 99999 somefile</code> to remove
+<code>somefile</code> from the CL.
+</p>
+
+<p>
+Creating the change uploads a copy of the diff to the code review server, but it does not
+notify anyone about it. To do that, you need to run <code>hg mail</code> (see below).
 </p>
 
 <p>
@@ -497,7 +509,7 @@ and perhaps the <a href="/AUTHORS"><code>AUTHORS</code></a> file.
 
 <p>The <a href="/CONTRIBUTORS"><code>CONTRIBUTORS</code></a> file
 defines who the Go contributors&mdash;the people&mdash;are;
-the <a href="/AUTHORS"><code>AUTHORS</code></a> file, which defines
+the <a href="/AUTHORS"><code>AUTHORS</code></a> file defines
 who &ldquo;The Go Authors&rdquo;&mdash;the copyright holders&mdash;are.
 The Go developers at Google will update these files when submitting
 your first change.
@@ -525,7 +537,7 @@ This rigmarole needs to be done only for your first submission.
 <p>Code that you contribute should use the standard copyright header:</p>
 
 <pre>
-// Copyright 2012 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 </pre>

@@ -27,11 +27,24 @@ RecordSpan(void *vh, byte *p)
 {
 	MHeap *h;
 	MSpan *s;
+	MSpan **all;
+	uint32 cap;
 
 	h = vh;
 	s = (MSpan*)p;
-	s->allnext = h->allspans;
-	h->allspans = s;
+	if(h->nspan >= h->nspancap) {
+		cap = 64*1024/sizeof(all[0]);
+		if(cap < h->nspancap*3/2)
+			cap = h->nspancap*3/2;
+		all = (MSpan**)runtime·SysAlloc(cap*sizeof(all[0]));
+		if(h->allspans) {
+			runtime·memmove(all, h->allspans, h->nspancap*sizeof(all[0]));
+			runtime·SysFree(h->allspans, h->nspancap*sizeof(all[0]));
+		}
+		h->allspans = all;
+		h->nspancap = cap;
+	}
+	h->allspans[h->nspan++] = s;
 }
 
 // Initialize the heap; fetch memory using alloc.
@@ -53,12 +66,12 @@ runtime·MHeap_Init(MHeap *h, void *(*alloc)(uintptr))
 // Allocate a new span of npage pages from the heap
 // and record its size class in the HeapMap and HeapMapCache.
 MSpan*
-runtime·MHeap_Alloc(MHeap *h, uintptr npage, int32 sizeclass, int32 acct)
+runtime·MHeap_Alloc(MHeap *h, uintptr npage, int32 sizeclass, int32 acct, int32 zeroed)
 {
 	MSpan *s;
 
 	runtime·lock(h);
-	runtime·purgecachedstats(m);
+	runtime·purgecachedstats(m->mcache);
 	s = MHeap_AllocLocked(h, npage, sizeclass);
 	if(s != nil) {
 		mstats.heap_inuse += npage<<PageShift;
@@ -68,6 +81,8 @@ runtime·MHeap_Alloc(MHeap *h, uintptr npage, int32 sizeclass, int32 acct)
 		}
 	}
 	runtime·unlock(h);
+	if(s != nil && *(uintptr*)(s->start<<PageShift) != 0 && zeroed)
+		runtime·memclr((byte*)(s->start<<PageShift), s->npages<<PageShift);
 	return s;
 }
 
@@ -125,12 +140,11 @@ HaveSpan:
 		MHeap_FreeLocked(h, t);
 	}
 
-	if(*(uintptr*)(s->start<<PageShift) != 0)
-		runtime·memclr((byte*)(s->start<<PageShift), s->npages<<PageShift);
-
 	// Record span info, because gc needs to be
 	// able to map interior pointer to containing span.
 	s->sizeclass = sizeclass;
+	s->elemsize = (sizeclass==0 ? s->npages<<PageShift : runtime·class_to_size[sizeclass]);
+	s->types.compression = MTypes_Empty;
 	p = s->start;
 	if(sizeof(void*) == 8)
 		p -= ((uintptr)h->arena_start>>PageShift);
@@ -259,7 +273,7 @@ void
 runtime·MHeap_Free(MHeap *h, MSpan *s, int32 acct)
 {
 	runtime·lock(h);
-	runtime·purgecachedstats(m);
+	runtime·purgecachedstats(m->mcache);
 	mstats.heap_inuse -= s->npages<<PageShift;
 	if(acct) {
 		mstats.heap_alloc -= s->npages<<PageShift;
@@ -275,6 +289,10 @@ MHeap_FreeLocked(MHeap *h, MSpan *s)
 	uintptr *sp, *tp;
 	MSpan *t;
 	PageID p;
+
+	if(s->types.sysalloc)
+		runtime·settype_sysfree(s);
+	s->types.compression = MTypes_Empty;
 
 	if(s->state != MSpanInUse || s->ref != 0) {
 		runtime·printf("MHeap_FreeLocked - span %p ptr %p state %d ref %d\n", s, s->start<<PageShift, s->state, s->ref);
@@ -325,6 +343,13 @@ MHeap_FreeLocked(MHeap *h, MSpan *s)
 		runtime·MSpanList_Insert(&h->large, s);
 }
 
+static void
+forcegchelper(Note *note)
+{
+	runtime·gc(1);
+	runtime·notewakeup(note);
+}
+
 // Release (part of) unused memory to OS.
 // Goroutine created at startup.
 // Loop forever.
@@ -338,7 +363,7 @@ runtime·MHeap_Scavenger(void)
 	uintptr released, sumreleased;
 	byte *env;
 	bool trace;
-	Note note;
+	Note note, *notep;
 
 	// If we go two minutes without a garbage collection, force one to run.
 	forcegc = 2*60*1e9;
@@ -367,7 +392,15 @@ runtime·MHeap_Scavenger(void)
 		now = runtime·nanotime();
 		if(now - mstats.last_gc > forcegc) {
 			runtime·unlock(h);
-			runtime·gc(1);
+			// The scavenger can not block other goroutines,
+			// otherwise deadlock detector can fire spuriously.
+			// GC blocks other goroutines via the runtime·worldsema.
+			runtime·noteclear(&note);
+			notep = &note;
+			runtime·newproc1((byte*)forcegchelper, (byte*)&notep, sizeof(notep), 0, runtime·MHeap_Scavenger);
+			runtime·entersyscall();
+			runtime·notesleep(&note);
+			runtime·exitsyscall();
 			runtime·lock(h);
 			now = runtime·nanotime();
 			if (trace)
@@ -414,9 +447,11 @@ runtime·MSpan_Init(MSpan *span, PageID start, uintptr npages)
 	span->freelist = nil;
 	span->ref = 0;
 	span->sizeclass = 0;
+	span->elemsize = 0;
 	span->state = 0;
 	span->unusedsince = 0;
 	span->npreleased = 0;
+	span->types.compression = MTypes_Empty;
 }
 
 // Initialize an empty doubly-linked list.
