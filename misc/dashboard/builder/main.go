@@ -32,6 +32,7 @@ const (
 // These variables are copied from the gobuilder's environment
 // to the envv of its subprocesses.
 var extraEnv = []string{
+	"CC",
 	"GOARM",
 	"GOHOSTARCH",
 	"GOHOSTOS",
@@ -46,7 +47,7 @@ type Builder struct {
 }
 
 var (
-	buildroot     = flag.String("buildroot", filepath.Join(os.TempDir(), "gobuilder"), "Directory under which to build")
+	buildroot     = flag.String("buildroot", defaultBuildRoot(), "Directory under which to build")
 	commitFlag    = flag.Bool("commit", false, "upload information about new commits")
 	dashboard     = flag.String("dashboard", "build.golang.org", "Go Dashboard Host")
 	buildRelease  = flag.Bool("release", false, "Build and upload binary release archives")
@@ -54,6 +55,8 @@ var (
 	buildCmd      = flag.String("cmd", filepath.Join(".", allCmd), "Build command (specify relative to go/src/)")
 	failAll       = flag.Bool("fail", false, "fail all builds")
 	parallel      = flag.Bool("parallel", false, "Build multiple targets in parallel")
+	buildTimeout  = flag.Duration("buildTimeout", 60*time.Minute, "Maximum time to wait for builds and tests")
+	cmdTimeout    = flag.Duration("cmdTimeout", 5*time.Minute, "Maximum time to wait for an external command")
 	verbose       = flag.Bool("v", false, "verbose")
 )
 
@@ -206,7 +209,7 @@ func NewBuilder(builder string) (*Builder, error) {
 }
 
 // build checks for a new commit for this builder
-// and builds it if one is found. 
+// and builds it if one is found.
 // It returns true if a build was attempted.
 func (b *Builder) build() bool {
 	hash, err := b.todo("build-go-commit", "", "")
@@ -220,7 +223,7 @@ func (b *Builder) build() bool {
 	// Look for hash locally before running hg pull.
 	if _, err := fullHash(goroot, hash[:12]); err != nil {
 		// Don't have hash, so run hg pull.
-		if err := run(nil, goroot, "hg", "pull"); err != nil {
+		if err := run(*cmdTimeout, nil, goroot, hgCmd("pull")...); err != nil {
 			log.Println("hg pull failed:", err)
 			return false
 		}
@@ -243,12 +246,12 @@ func (b *Builder) buildHash(hash string) error {
 	defer os.RemoveAll(workpath)
 
 	// clone repo
-	if err := run(nil, workpath, "hg", "clone", goroot, "go"); err != nil {
+	if err := run(*cmdTimeout, nil, workpath, hgCmd("clone", goroot, "go")...); err != nil {
 		return err
 	}
 
 	// update to specified revision
-	if err := run(nil, filepath.Join(workpath, "go"), "hg", "update", hash); err != nil {
+	if err := run(*cmdTimeout, nil, filepath.Join(workpath, "go"), hgCmd("update", hash)...); err != nil {
 		return err
 	}
 
@@ -261,7 +264,7 @@ func (b *Builder) buildHash(hash string) error {
 		cmd = filepath.Join(srcDir, cmd)
 	}
 	startTime := time.Now()
-	buildLog, status, err := runLog(b.envv(), logfile, srcDir, cmd)
+	buildLog, status, err := runLog(*buildTimeout, b.envv(), logfile, srcDir, cmd)
 	runTime := time.Now().Sub(startTime)
 	if err != nil {
 		return fmt.Errorf("%s: %s", *buildCmd, err)
@@ -278,13 +281,15 @@ func (b *Builder) buildHash(hash string) error {
 	}
 
 	// build Go sub-repositories
-	b.buildSubrepos(filepath.Join(workpath, "go"), hash)
+	goRoot := filepath.Join(workpath, "go")
+	goPath := workpath
+	b.buildSubrepos(goRoot, goPath, hash)
 
 	return nil
 }
 
 // failBuild checks for a new commit for this builder
-// and fails it if one is found. 
+// and fails it if one is found.
 // It returns true if a build was "attempted".
 func (b *Builder) failBuild() bool {
 	hash, err := b.todo("build-go-commit", "", "")
@@ -304,7 +309,7 @@ func (b *Builder) failBuild() bool {
 	return true
 }
 
-func (b *Builder) buildSubrepos(goRoot, goHash string) {
+func (b *Builder) buildSubrepos(goRoot, goPath, goHash string) {
 	for _, pkg := range dashboardPackages("subrepo") {
 		// get the latest todo for this package
 		hash, err := b.todo("build-package", pkg, goHash)
@@ -320,7 +325,7 @@ func (b *Builder) buildSubrepos(goRoot, goHash string) {
 		if *verbose {
 			log.Printf("buildSubrepos %s: building %q", pkg, hash)
 		}
-		buildLog, err := b.buildSubrepo(goRoot, pkg, hash)
+		buildLog, err := b.buildSubrepo(goRoot, goPath, pkg, hash)
 		if err != nil {
 			if buildLog == "" {
 				buildLog = err.Error()
@@ -338,43 +343,37 @@ func (b *Builder) buildSubrepos(goRoot, goHash string) {
 
 // buildSubrepo fetches the given package, updates it to the specified hash,
 // and runs 'go test -short pkg/...'. It returns the build log and any error.
-func (b *Builder) buildSubrepo(goRoot, pkg, hash string) (string, error) {
-	goBin := filepath.Join(goRoot, "bin")
-	goTool := filepath.Join(goBin, "go")
-	env := append(b.envv(), "GOROOT="+goRoot)
+func (b *Builder) buildSubrepo(goRoot, goPath, pkg, hash string) (string, error) {
+	goTool := filepath.Join(goRoot, "bin", "go")
+	env := append(b.envv(), "GOROOT="+goRoot, "GOPATH="+goPath)
 
-	// add goBin to PATH
+	// add $GOROOT/bin and $GOPATH/bin to PATH
 	for i, e := range env {
 		const p = "PATH="
 		if !strings.HasPrefix(e, p) {
 			continue
 		}
-		env[i] = p + goBin + string(os.PathListSeparator) + e[len(p):]
+		sep := string(os.PathListSeparator)
+		env[i] = p + filepath.Join(goRoot, "bin") + sep + filepath.Join(goPath, "bin") + sep + e[len(p):]
 	}
 
 	// fetch package and dependencies
-	log, status, err := runLog(env, "", goRoot, goTool, "get", "-d", pkg)
+	log, status, err := runLog(*cmdTimeout, env, "", goPath, goTool, "get", "-d", pkg+"/...")
 	if err == nil && status != 0 {
 		err = fmt.Errorf("go exited with status %d", status)
 	}
 	if err != nil {
-		// 'go get -d' will fail for a subrepo because its top-level
-		// directory does not contain a go package. No matter, just
-		// check whether an hg directory exists and proceed.
-		hgDir := filepath.Join(goRoot, "src/pkg", pkg, ".hg")
-		if fi, e := os.Stat(hgDir); e != nil || !fi.IsDir() {
-			return log, err
-		}
+		return log, err
 	}
 
 	// hg update to the specified hash
-	pkgPath := filepath.Join(goRoot, "src/pkg", pkg)
-	if err := run(nil, pkgPath, "hg", "update", hash); err != nil {
+	pkgPath := filepath.Join(goPath, "src", pkg)
+	if err := run(*cmdTimeout, nil, pkgPath, hgCmd("update", hash)...); err != nil {
 		return "", err
 	}
 
 	// test the package
-	log, status, err = runLog(env, "", goRoot, goTool, "test", "-short", pkg+"/...")
+	log, status, err = runLog(*buildTimeout, env, "", goPath, goTool, "test", "-short", pkg+"/...")
 	if err == nil && status != 0 {
 		err = fmt.Errorf("go exited with status %d", status)
 	}
@@ -475,7 +474,7 @@ func commitWatcher() {
 }
 
 func hgClone(url, path string) error {
-	return run(nil, *buildroot, "hg", "clone", url, path)
+	return run(*cmdTimeout, nil, *buildroot, hgCmd("clone", url, path)...)
 }
 
 func hgRepoExists(path string) bool {
@@ -532,17 +531,17 @@ func commitPoll(key, pkg string) {
 		}
 	}
 
-	if err := run(nil, pkgRoot, "hg", "pull"); err != nil {
+	if err := run(*cmdTimeout, nil, pkgRoot, hgCmd("pull")...); err != nil {
 		log.Printf("hg pull: %v", err)
 		return
 	}
 
 	const N = 50 // how many revisions to grab
 
-	data, _, err := runLog(nil, "", pkgRoot, "hg", "log",
+	data, _, err := runLog(*cmdTimeout, nil, "", pkgRoot, hgCmd("log",
 		"--encoding=utf-8",
 		"--limit="+strconv.Itoa(N),
-		"--template="+xmlLogTemplate,
+		"--template="+xmlLogTemplate)...,
 	)
 	if err != nil {
 		log.Printf("hg log: %v", err)
@@ -627,12 +626,12 @@ func addCommit(pkg, hash, key string) bool {
 
 // fullHash returns the full hash for the given Mercurial revision.
 func fullHash(root, rev string) (string, error) {
-	s, _, err := runLog(nil, "", root,
-		"hg", "log",
-		"--encoding=utf-8",
-		"--rev="+rev,
-		"--limit=1",
-		"--template={node}",
+	s, _, err := runLog(*cmdTimeout, nil, "", root,
+		hgCmd("log",
+			"--encoding=utf-8",
+			"--rev="+rev,
+			"--limit=1",
+			"--template={node}")...,
 	)
 	if err != nil {
 		return "", nil
@@ -668,6 +667,19 @@ func defaultSuffix() string {
 	return ".bash"
 }
 
+// defaultBuildRoot returns default buildroot directory.
+func defaultBuildRoot() string {
+	var d string
+	if runtime.GOOS == "windows" {
+		// will use c:\, otherwise absolute paths become too long
+		// during builder run, see http://golang.org/issue/3358.
+		d = `c:\`
+	} else {
+		d = os.TempDir()
+	}
+	return filepath.Join(d, "gobuilder")
+}
+
 func getenvOk(k string) (v string, ok bool) {
 	v = os.Getenv(k)
 	if v != "" {
@@ -680,4 +692,8 @@ func getenvOk(k string) (v string, ok bool) {
 		}
 	}
 	return "", false
+}
+
+func hgCmd(args ...string) []string {
+	return append([]string{"hg", "--config", "extensions.codereview=!"}, args...)
 }

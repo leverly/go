@@ -127,6 +127,13 @@ func main() {
 	// which is not what most people want when they do it.
 	if gopath := os.Getenv("GOPATH"); gopath == runtime.GOROOT() {
 		fmt.Fprintf(os.Stderr, "warning: GOPATH set to GOROOT (%s) has no effect\n", gopath)
+	} else {
+		for _, p := range filepath.SplitList(gopath) {
+			if build.IsLocalImport(p) {
+				fmt.Fprintf(os.Stderr, "go: GOPATH entry is relative; must be absolute path: %q.\nRun 'go help gopath' for usage.\n", p)
+				os.Exit(2)
+			}
+		}
 	}
 
 	for _, cmd := range commands {
@@ -144,8 +151,9 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Unknown command %#q\n\n", args[0])
-	usage()
+	fmt.Fprintf(os.Stderr, "go: unknown subcommand %q\nRun 'go help' for usage.\n", args[0])
+	setExitStatus(2)
+	exit()
 }
 
 var usageTemplate = `Go is a tool for managing Go source code.
@@ -339,6 +347,13 @@ func exitIfErrors() {
 
 func run(cmdargs ...interface{}) {
 	cmdline := stringList(cmdargs...)
+	if buildN || buildV {
+		fmt.Printf("%s\n", strings.Join(cmdline, " "))
+		if buildN {
+			return
+		}
+	}
+
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -415,7 +430,7 @@ func matchPackages(pattern string) []string {
 			return filepath.SkipDir
 		}
 
-		_, err = build.ImportDir(path, 0)
+		_, err = buildContext.ImportDir(path, 0)
 		if err != nil {
 			return nil
 		}
@@ -456,7 +471,7 @@ func matchPackages(pattern string) []string {
 			}
 			have[name] = true
 
-			_, err = build.ImportDir(path, 0)
+			_, err = buildContext.ImportDir(path, 0)
 			if err != nil && strings.Contains(err.Error(), "no Go source files") {
 				return nil
 			}
@@ -500,13 +515,25 @@ func matchPackagesInFS(pattern string) []string {
 
 	var pkgs []string
 	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
-		if err != nil || !fi.IsDir() || path == dir {
+		if err != nil || !fi.IsDir() {
 			return nil
 		}
+		if path == dir {
+			// filepath.Walk starts at dir and recurses. For the recursive case,
+			// the path is the result of filepath.Join, which calls filepath.Clean.
+			// The initial case is not Cleaned, though, so we do this explicitly.
+			//
+			// This converts a path like "./io/" to "io". Without this step, running
+			// "cd $GOROOT/src/pkg; go list ./io/..." would incorrectly skip the io
+			// package, because prepending the prefix "./" to the unclean path would
+			// result in "././io", and match("././io") returns false.
+			path = filepath.Clean(path)
+		}
 
-		// Avoid .foo, _foo, and testdata directory trees.
+		// Avoid .foo, _foo, and testdata directory trees, but do not avoid "." or "..".
 		_, elem := filepath.Split(path)
-		if strings.HasPrefix(elem, ".") || strings.HasPrefix(elem, "_") || elem == "testdata" {
+		dot := strings.HasPrefix(elem, ".") && elem != "." && elem != ".."
+		if dot || strings.HasPrefix(elem, "_") || elem == "testdata" {
 			return filepath.SkipDir
 		}
 

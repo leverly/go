@@ -7,7 +7,9 @@
 package url
 
 import (
+	"bytes"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -61,16 +63,16 @@ func (e EscapeError) Error() string {
 }
 
 // Return true if the specified character should be escaped when
-// appearing in a URL string, according to RFC 2396.
+// appearing in a URL string, according to RFC 3986.
 // When 'all' is true the full range of reserved characters are matched.
 func shouldEscape(c byte, mode encoding) bool {
-	// RFC 2396 §2.3 Unreserved characters (alphanum)
+	// §2.3 Unreserved characters (alphanum)
 	if 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' {
 		return false
 	}
-	// TODO: Update the character sets after RFC 3986.
+
 	switch c {
-	case '-', '_', '.', '!', '~', '*', '\'', '(', ')': // §2.3 Unreserved characters (mark)
+	case '-', '_', '.', '~': // §2.3 Unreserved characters (mark)
 		return false
 
 	case '$', '&', '+', ',', '/', ':', ';', '=', '?', '@': // §2.2 Reserved characters (reserved)
@@ -222,7 +224,7 @@ type URL struct {
 	Scheme   string
 	Opaque   string    // encoded opaque data
 	User     *Userinfo // username and password information
-	Host     string
+	Host     string    // host or host:port
 	Path     string
 	RawQuery string // encoded query values, without '?'
 	Fragment string // fragment for references, without '#'
@@ -359,6 +361,11 @@ func parse(rawurl string, viaRequest bool) (url *URL, err error) {
 	}
 	url = new(URL)
 
+	if rawurl == "*" {
+		url.Path = "*"
+		return
+	}
+
 	// Split off possible leading "http:", "mailto:", etc.
 	// Cannot contain escaped characters.
 	if url.Scheme, rest, err = getscheme(rawurl); err != nil {
@@ -401,11 +408,12 @@ Error:
 }
 
 func parseAuthority(authority string) (user *Userinfo, host string, err error) {
-	if strings.Index(authority, "@") < 0 {
+	i := strings.LastIndex(authority, "@")
+	if i < 0 {
 		host = authority
 		return
 	}
-	userinfo, host := split(authority, '@', true)
+	userinfo, host := authority[:i], authority[i+1:]
 	if strings.Index(userinfo, ":") < 0 {
 		if userinfo, err = unescape(userinfo, encodeUserPassword); err != nil {
 			return
@@ -518,12 +526,16 @@ func parseQuery(m Values, query string) (err error) {
 		}
 		key, err1 := QueryUnescape(key)
 		if err1 != nil {
-			err = err1
+			if err == nil {
+				err = err1
+			}
 			continue
 		}
 		value, err1 = QueryUnescape(value)
 		if err1 != nil {
-			err = err1
+			if err == nil {
+				err = err1
+			}
 			continue
 		}
 		m[key] = append(m[key], value)
@@ -537,14 +549,24 @@ func (v Values) Encode() string {
 	if v == nil {
 		return ""
 	}
-	parts := make([]string, 0, len(v)) // will be large enough for most uses
-	for k, vs := range v {
+	var buf bytes.Buffer
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		vs := v[k]
 		prefix := QueryEscape(k) + "="
 		for _, v := range vs {
-			parts = append(parts, prefix+QueryEscape(v))
+			if buf.Len() > 0 {
+				buf.WriteByte('&')
+			}
+			buf.WriteString(prefix)
+			buf.WriteString(QueryEscape(v))
 		}
 	}
-	return strings.Join(parts, "&")
+	return buf.String()
 }
 
 // resolvePath applies special path segments from refs and applies
@@ -555,23 +577,33 @@ func resolvePath(basepath string, refpath string) string {
 	if len(base) == 0 {
 		base = []string{""}
 	}
+
+	rm := true
 	for idx, ref := range refs {
 		switch {
 		case ref == ".":
-			base[len(base)-1] = ""
+			if idx == 0 {
+				base[len(base)-1] = ""
+				rm = true
+			} else {
+				rm = false
+			}
 		case ref == "..":
 			newLen := len(base) - 1
 			if newLen < 1 {
 				newLen = 1
 			}
 			base = base[0:newLen]
-			base[len(base)-1] = ""
+			if rm {
+				base[len(base)-1] = ""
+			}
 		default:
 			if idx == 0 || base[len(base)-1] == "" {
 				base[len(base)-1] = ref
 			} else {
 				base = append(base, ref)
 			}
+			rm = false
 		}
 	}
 	return strings.Join(base, "/")

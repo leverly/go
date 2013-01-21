@@ -23,6 +23,16 @@ import (
 var verbose = flag.Bool("v", false, "verbose")
 var exitCode = 0
 
+// Flags to control which checks to perform
+var (
+	vetAll             = flag.Bool("all", true, "check everything; disabled if any explicit check is requested")
+	vetMethods         = flag.Bool("methods", false, "check that canonically named methods are canonically defined")
+	vetPrintf          = flag.Bool("printf", false, "check printf-like invocations")
+	vetStructTags      = flag.Bool("structtags", false, "check that struct field tags have canonical format")
+	vetUntaggedLiteral = flag.Bool("composites", false, "check that composite literals used type-tagged elements")
+	vetRangeLoops      = flag.Bool("rangeloops", false, "check that range loop variables are used correctly")
+)
+
 // setExit sets the value for os.Exit when it is called, later.  It
 // remembers the highest value.
 func setExit(err int) {
@@ -49,6 +59,11 @@ type File struct {
 func main() {
 	flag.Usage = Usage
 	flag.Parse()
+
+	// If a check is named explicitly, turn off the 'all' flag.
+	if *vetMethods || *vetPrintf || *vetStructTags || *vetUntaggedLiteral || *vetRangeLoops {
+		*vetAll = false
+	}
 
 	if *printfuncs != "" {
 		for _, name := range strings.Split(*printfuncs, ",") {
@@ -183,6 +198,8 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		f.walkMethodDecl(n)
 	case *ast.InterfaceType:
 		f.walkInterfaceType(n)
+	case *ast.RangeStmt:
+		f.walkRangeStmt(n)
 	}
 	return f
 }
@@ -190,6 +207,16 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 // walkCall walks a call expression.
 func (f *File) walkCall(call *ast.CallExpr, name string) {
 	f.checkFmtPrintfCall(call, name)
+}
+
+// walkCallExpr walks a call expression.
+func (f *File) walkCallExpr(call *ast.CallExpr) {
+	switch x := call.Fun.(type) {
+	case *ast.Ident:
+		f.walkCall(call, x.Name)
+	case *ast.SelectorExpr:
+		f.walkCall(call, x.Sel.Name)
+	}
 }
 
 // walkCompositeLit walks a composite literal.
@@ -228,12 +255,7 @@ func (f *File) walkInterfaceType(t *ast.InterfaceType) {
 	}
 }
 
-// walkCallExpr walks a call expression.
-func (f *File) walkCallExpr(call *ast.CallExpr) {
-	switch x := call.Fun.(type) {
-	case *ast.Ident:
-		f.walkCall(call, x.Name)
-	case *ast.SelectorExpr:
-		f.walkCall(call, x.Sel.Name)
-	}
+// walkRangeStmt walks a range statement.
+func (f *File) walkRangeStmt(n *ast.RangeStmt) {
+	checkRangeLoop(f, n)
 }

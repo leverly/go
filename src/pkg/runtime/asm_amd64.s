@@ -31,6 +31,10 @@ TEXT _rt0_amd64(SB),7,$-8
 	JEQ ok
 
 needtls:
+	// skip TLS setup on Plan 9
+	CMPL	runtime·isplan9(SB), $1
+	JEQ ok
+
 	LEAQ	runtime·tls0(SB), DI
 	CALL	runtime·settls(SB)
 
@@ -344,6 +348,30 @@ TEXT runtime·cas(SB), 7, $0
 	MOVL	$1, AX
 	RET
 
+// bool	runtime·cas64(uint64 *val, uint64 *old, uint64 new)
+// Atomically:
+//	if(*val == *old){
+//		*val = new;
+//		return 1;
+//	} else {
+//		*old = *val
+//		return 0;
+//	}
+TEXT runtime·cas64(SB), 7, $0
+	MOVQ	8(SP), BX
+	MOVQ	16(SP), BP
+	MOVQ	0(BP), AX
+	MOVQ	24(SP), CX
+	LOCK
+	CMPXCHGQ	CX, 0(BX)
+	JNZ	cas64_fail
+	MOVL	$1, AX
+	RET
+cas64_fail:
+	MOVQ	AX, 0(BP)
+	MOVL	$0, AX
+	RET
+
 // bool casp(void **val, void *old, void *new)
 // Atomically:
 //	if(*val == old){
@@ -376,6 +404,15 @@ TEXT runtime·xadd(SB), 7, $0
 	ADDL	CX, AX
 	RET
 
+TEXT runtime·xadd64(SB), 7, $0
+	MOVQ	8(SP), BX
+	MOVQ	16(SP), AX
+	MOVQ	AX, CX
+	LOCK
+	XADDQ	AX, 0(BX)
+	ADDQ	CX, AX
+	RET
+
 TEXT runtime·xchg(SB), 7, $0
 	MOVQ	8(SP), BX
 	MOVL	16(SP), AX
@@ -400,6 +437,12 @@ TEXT runtime·atomicstore(SB), 7, $0
 	MOVQ	8(SP), BX
 	MOVL	16(SP), AX
 	XCHGL	AX, 0(BX)
+	RET
+
+TEXT runtime·atomicstore64(SB), 7, $0
+	MOVQ	8(SP), BX
+	MOVQ	16(SP), AX
+	XCHGQ	AX, 0(BX)
 	RET
 
 // void jmpdefer(fn, sp);
@@ -446,19 +489,21 @@ TEXT runtime·asmcgocall(SB),7,$0
 	MOVQ	(g_sched+gobuf_sp)(SI), SP
 
 	// Now on a scheduling stack (a pthread-created stack).
-	SUBQ	$48, SP
+	// Make sure we have enough room for 4 stack-backed fast-call
+	// registers as per windows amd64 calling convention.
+	SUBQ	$64, SP
 	ANDQ	$~15, SP	// alignment for gcc ABI
-	MOVQ	DI, 32(SP)	// save g
-	MOVQ	DX, 24(SP)	// save SP
+	MOVQ	DI, 48(SP)	// save g
+	MOVQ	DX, 40(SP)	// save SP
 	MOVQ	BX, DI		// DI = first argument in AMD64 ABI
 	MOVQ	BX, CX		// CX = first argument in Win64
 	CALL	AX
 
 	// Restore registers, g, stack pointer.
 	get_tls(CX)
-	MOVQ	32(SP), DI
+	MOVQ	48(SP), DI
 	MOVQ	DI, g(CX)
-	MOVQ	24(SP), SP
+	MOVQ	40(SP), SP
 	RET
 
 // cgocallback(void (*fn)(void*), void *frame, uintptr framesize)

@@ -13,7 +13,7 @@
 void
 closurehdr(Node *ntype)
 {
-	Node *n, *name, *a;
+	Node *n, *name, *a, *orig;
 	NodeList *l;
 
 	n = nod(OCLOSURE, N, N);
@@ -43,8 +43,11 @@ closurehdr(Node *ntype)
 	}
 	for(l=n->rlist; l; l=l->next) {
 		name = l->n->left;
-		if(name)
+		if(name) {
+			orig = name->orig;  // preserve the meaning of orig == N (anonymous PPARAMOUT)
 			name = newname(name->sym);
+			name->orig = orig;
+		}
 		ntype->rlist = list(ntype->rlist, nod(ODCLFIELD, name, l->n->right));
 	}
 }
@@ -75,6 +78,8 @@ closurebody(NodeList *body)
 	return func;
 }
 
+static Node* makeclosure(Node *func, int nowrap);
+
 void
 typecheckclosure(Node *func, int top)
 {
@@ -85,12 +90,12 @@ typecheckclosure(Node *func, int top)
 	oldfn = curfn;
 	typecheck(&func->ntype, Etype);
 	func->type = func->ntype->type;
-	if(curfn == nil) {
-		xtop = list(xtop, func);
-		return;
-	}
-
-	if(func->type != T) {
+	
+	// Type check the body now, but only if we're inside a function.
+	// At top level (in a variable initialization: curfn==nil) we're not
+	// ready to type check code yet; we'll check it later, because the
+	// underlying closure function we create is added to xtop.
+	if(curfn && func->type != T) {
 		curfn = func;
 		typechecklist(func->nbody, Etop);
 		curfn = oldfn;
@@ -120,17 +125,18 @@ typecheckclosure(Node *func, int top)
 		func->enter = list(func->enter, v->heapaddr);
 		v->heapaddr = N;
 	}
+
+	// Create top-level function 
+	xtop = list(xtop, makeclosure(func, func->cvars==nil || (top&Ecall)));
 }
 
 static Node*
-makeclosure(Node *func, NodeList **init, int nowrap)
+makeclosure(Node *func, int nowrap)
 {
 	Node *xtype, *v, *addr, *xfunc;
 	NodeList *l;
 	static int closgen;
 	char *p;
-
-	USED(init);
 
 	/*
 	 * wrap body in external function
@@ -168,8 +174,9 @@ makeclosure(Node *func, NodeList **init, int nowrap)
 
 	// create the function
 	xfunc = nod(ODCLFUNC, N, N);
-	snprint(namebuf, sizeof namebuf, "_func_%.3d", ++closgen);
+	snprint(namebuf, sizeof namebuf, "func·%.3d", ++closgen);
 	xfunc->nname = newname(lookup(namebuf));
+	xfunc->nname->sym->flags |= SymExported; // disable export
 	xfunc->nname->ntype = xtype;
 	xfunc->nname->defn = xfunc;
 	declare(xfunc->nname, PFUNC);
@@ -180,7 +187,13 @@ makeclosure(Node *func, NodeList **init, int nowrap)
 	if(xfunc->nbody == nil)
 		fatal("empty body - won't generate any code");
 	typecheck(&xfunc, Etop);
-	closures = list(closures, xfunc);
+	
+	xfunc->closure = func;
+	func->closure = xfunc;
+	
+	func->nbody = nil;
+	func->list = nil;
+	func->rlist = nil;
 
 	return xfunc;
 }
@@ -194,7 +207,7 @@ walkclosure(Node *func, NodeList **init)
 
 	// no closure vars, don't bother wrapping
 	if(func->cvars == nil)
-		return makeclosure(func, init, 1)->nname;
+		return func->closure->nname;
 
 	/*
 	 * wrap body in external function
@@ -202,7 +215,7 @@ walkclosure(Node *func, NodeList **init)
 	 */
 
 	// create the function
-	xfunc = makeclosure(func, init, 0);
+	xfunc = func->closure;
 	xtype = xfunc->nname->ntype;
 
 	// prepare call of sys.closure that turns external func into func literal value.
@@ -242,6 +255,7 @@ walkclosure(Node *func, NodeList **init)
 void
 walkcallclosure(Node *n, NodeList **init)
 {
+	USED(init);
 	if (n->op != OCALLFUNC || n->left->op != OCLOSURE) {
 		dump("walkcallclosure", n);
 		fatal("abuse of walkcallclosure");
@@ -250,7 +264,7 @@ walkcallclosure(Node *n, NodeList **init)
 	// New arg list for n. First the closure-args
 	// and then the original parameter list.
 	n->list = concat(n->left->enter, n->list);
-	n->left = makeclosure(n->left, init, 1)->nname;
+	n->left = n->left->closure->nname;
 	dowidth(n->left->type);
 	n->type = getoutargx(n->left->type);
 	// for a single valued function, pull the field type out of the struct

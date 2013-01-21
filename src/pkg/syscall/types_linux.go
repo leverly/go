@@ -73,7 +73,7 @@ struct sockaddr_any {
 	char pad[sizeof(union sockaddr_all) - sizeof(struct sockaddr)];
 };
 
-// copied from /usr/include/linux/un.h 
+// copied from /usr/include/linux/un.h
 struct my_sockaddr_un {
 	sa_family_t sun_family;
 #ifdef __ARM_EABI__
@@ -195,6 +195,8 @@ type Inet6Pktinfo C.struct_in6_pktinfo
 
 type Ucred C.struct_ucred
 
+type TCPInfo C.struct_tcp_info
+
 const (
 	SizeofSockaddrInet4     = C.sizeof_struct_sockaddr_in
 	SizeofSockaddrInet6     = C.sizeof_struct_sockaddr_in6
@@ -211,6 +213,7 @@ const (
 	SizeofInet4Pktinfo      = C.sizeof_struct_in_pktinfo
 	SizeofInet6Pktinfo      = C.sizeof_struct_in6_pktinfo
 	SizeofUcred             = C.sizeof_struct_ucred
+	SizeofTCPInfo           = C.sizeof_struct_tcp_info
 )
 
 // Netlink routing and interface messages
@@ -344,6 +347,10 @@ type Utsname C.struct_utsname
 type Ustat_t C.struct_ustat
 
 type EpollEvent C.struct_my_epoll_event
+
+const (
+	_AT_FDCWD = C.AT_FDCWD
+)
 
 // Terminal handling
 

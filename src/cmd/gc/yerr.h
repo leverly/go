@@ -65,9 +65,12 @@ static struct {
 	425, ';',
 	"need trailing comma before newline in composite literal",
 	
+	435, ';',
+	"need trailing comma before newline in composite literal",
+	
 	112, LNAME,
 	"nested func not allowed",
 
-	615, ';',
+	641, ';',
 	"else must be followed by if or statement block"
 };

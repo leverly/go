@@ -714,6 +714,7 @@ func unhex(c byte) byte {
 <p>
 There is no automatic fall through, but cases can be presented
 in comma-separated lists.
+</p>
 <pre>
 func shouldEscape(c byte) bool {
     switch c {
@@ -725,10 +726,11 @@ func shouldEscape(c byte) bool {
 </pre>
 
 <p>
-Here's a comparison routine for byte arrays that uses two
+Here's a comparison routine for byte slices that uses two
 <code>switch</code> statements:
+</p>
 <pre>
-// Compare returns an integer comparing the two byte arrays,
+// Compare returns an integer comparing the two byte slices,
 // lexicographically.
 // The result will be 0 if a == b, -1 if a &lt; b, and +1 if a &gt; b
 func Compare(a, b []byte) int {
@@ -808,7 +810,7 @@ This is a common style; see the section on error handling for more examples.
 A similar approach obviates the need to pass a pointer to a return
 value to simulate a reference parameter.
 Here's a simple-minded function to
-grab a number from a position in a byte array, returning the number
+grab a number from a position in a byte slice, returning the number
 and the next position.
 </p>
 
@@ -825,12 +827,12 @@ func nextInt(b []byte, i int) (int, int) {
 </pre>
 
 <p>
-You could use it to scan the numbers in an input array <code>a</code> like this:
+You could use it to scan the numbers in an input slice <code>b</code> like this:
 </p>
 
 <pre>
-    for i := 0; i &lt; len(a); {
-        x, i = nextInt(a, i)
+    for i := 0; i &lt; len(b); {
+        x, i = nextInt(b, i)
         fmt.Println(x)
     }
 </pre>
@@ -1180,6 +1182,7 @@ structure with length 10 and a capacity of 100 pointing at the first
 for more information.)
 In contrast, <code>new([]int)</code> returns a pointer to a newly allocated, zeroed slice
 structure, that is, a pointer to a <code>nil</code> slice value.
+</p>
 
 <p>
 These examples illustrate the difference between <code>new</code> and
@@ -1330,6 +1333,8 @@ func Append(slice, data[]byte) []byte {
 We must return the slice afterwards because, although <code>Append</code>
 can modify the elements of <code>slice</code>, the slice itself (the run-time data
 structure holding the pointer, length, and capacity) is passed by value.
+</p>
+
 <p>
 The idea of appending to a slice is so useful it's captured by the
 <code>append</code> built-in function.  To understand that function's
@@ -1369,8 +1374,8 @@ var timeZone = map[string] int {
 </pre>
 <p>
 Assigning and fetching map values looks syntactically just like
-doing the same for arrays except that the index doesn't need to
-be an integer.
+doing the same for arrays and slices except that the index doesn't
+need to be an integer.
 </p>
 <pre>
 offset := timeZone["EST"]
@@ -1495,7 +1500,7 @@ prints
 If you just want the default conversion, such as decimal for integers, you can use
 the catchall format <code>%v</code> (for &ldquo;value&rdquo;); the result is exactly
 what <code>Print</code> and <code>Println</code> would produce.
-Moreover, that format can print <em>any</em> value, even arrays, structs, and
+Moreover, that format can print <em>any</em> value, even arrays, slices, structs, and
 maps.  Here is a print statement for the time zone map defined in the previous section.
 </p>
 <pre>
@@ -1539,12 +1544,13 @@ map[string] int{"CST":-21600, "PST":-28800, "EST":-18000, "UTC":0, "MST":-25200}
 That quoted string format is also available through <code>%q</code> when
 applied to a value of type <code>string</code> or <code>[]byte</code>;
 the alternate format <code>%#q</code> will use backquotes instead if possible.
-Also, <code>%x</code> works on strings and arrays of bytes as well as on integers,
-generating a long hexadecimal string, and with
+Also, <code>%x</code> works on strings, byte arrays and byte slices as well as
+on integers, generating a long hexadecimal string, and with
 a space in the format (<code>%&nbsp;x</code>) it puts spaces between the bytes.
 </p>
 <p>
 Another handy format is <code>%T</code>, which prints the <em>type</em> of a value.
+</p>
 <pre>
 fmt.Printf(&quot;%T\n&quot;, timeZone)
 </pre>
@@ -1606,6 +1612,7 @@ func Println(v ...interface{}) {
 We write <code>...</code> after <code>v</code> in the nested call to <code>Sprintln</code> to tell the
 compiler to treat <code>v</code> as a list of arguments; otherwise it would just pass
 <code>v</code> as a single slice argument.
+</p>
 <p>
 There's even more to printing than we've covered here.  See the <code>godoc</code> documentation
 for package <code>fmt</code> for the details.
@@ -1738,9 +1745,9 @@ initializer can be a general expression computed at run time.
 </p>
 <pre>
 var (
-    HOME = os.Getenv("HOME")
-    USER = os.Getenv("USER")
-    GOROOT = os.Getenv("GOROOT")
+    home   = os.Getenv("HOME")
+    user   = os.Getenv("USER")
+    goRoot = os.Getenv("GOROOT")
 )
 </pre>
 
@@ -1763,17 +1770,17 @@ correctness of the program state before real execution begins.
 
 <pre>
 func init() {
-    if USER == "" {
+    if user == "" {
         log.Fatal("$USER not set")
     }
-    if HOME == "" {
-        HOME = "/usr/" + USER
+    if home == "" {
+        home = "/home/" + user
     }
-    if GOROOT == "" {
-        GOROOT = HOME + "/go"
+    if goRoot == "" {
+        goRoot = home + "/go"
     }
-    // GOROOT may be overridden by --goroot flag on command line.
-    flag.StringVar(&amp;GOROOT, "goroot", GOROOT, "Go root directory")
+    // goRoot may be overridden by --goroot flag on command line.
+    flag.StringVar(&amp;goRoot, "goroot", goRoot, "Go root directory")
 }
 </pre>
 
@@ -1783,6 +1790,7 @@ func init() {
 <p>
 Methods can be defined for any named type that is not a pointer or an interface;
 the receiver does not have to be a struct.
+</p>
 <p>
 In the discussion of slices above, we wrote an <code>Append</code>
 function.  We can define it as a method on slices instead.  To do
@@ -2012,6 +2020,7 @@ Those methods include the standard <code>Write</code> method, so an
 can be used.
 <code>Request</code> is a struct containing a parsed representation
 of the request from the client.
+</p>
 <p>
 For brevity, let's ignore POSTs and assume HTTP requests are always
 GETs; that simplification does not affect the way the handlers are
@@ -2034,6 +2043,7 @@ func (ctr *Counter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 (Keeping with our theme, note how <code>Fprintf</code> can print to an
 <code>http.ResponseWriter</code>.)
 For reference, here's how to attach such a server to a node on the URL tree.
+</p>
 <pre>
 import "net/http"
 ...
@@ -2187,6 +2197,7 @@ what a <code>Reader</code> does <em>and</em> what a <code>Writer</code>
 does; it is a union of the embedded interfaces (which must be disjoint
 sets of methods).
 Only interfaces can be embedded within interfaces.
+</p>
 <p>
 The same basic idea applies to structs, but with more far-reaching
 implications.  The <code>bufio</code> package has two struct types,
@@ -2291,7 +2302,7 @@ This would be useful if we wanted to refine the methods of <code>Logger</code>.
 </p>
 <pre>
 func (job *Job) Logf(format string, args ...interface{}) {
-    job.Logger.Logf("%q: %s", job.Command, fmt.Sprintf(format, args))
+    job.Logger.Logf("%q: %s", job.Command, fmt.Sprintf(format, args...))
 }
 </pre>
 <p>
@@ -2378,10 +2389,11 @@ exits, silently.  (The effect is similar to the Unix shell's
 background.)
 </p>
 <pre>
-go list.Sort()  // run list.Sort concurrently; don't wait for it. 
+go list.Sort()  // run list.Sort concurrently; don't wait for it.
 </pre>
 <p>
 A function literal can be handy in a goroutine invocation.
+</p>
 <pre>
 func Announce(message string, delay time.Duration) {
     go func() {
@@ -2393,6 +2405,7 @@ func Announce(message string, delay time.Duration) {
 <p>
 In Go, function literals are closures: the implementation makes
 sure the variables referred to by the function survive as long as they are active.
+</p>
 <p>
 These examples aren't too practical because the functions have no way of signaling
 completion.  For that, we need channels.
@@ -2425,7 +2438,7 @@ c := make(chan int)  // Allocate a channel.
 // Start the sort in a goroutine; when it completes, signal on the channel.
 go func() {
     list.Sort()
-    c &lt;- 1  // Send a signal; value does not matter. 
+    c &lt;- 1  // Send a signal; value does not matter.
 }()
 doSomethingForAWhile()
 &lt;-c   // Wait for sort to finish; discard sent value.
@@ -2479,7 +2492,7 @@ func handle(queue chan *Request) {
     }
 }
 
-func Serve(clientRequests chan *clientRequests, quit chan bool) {
+func Serve(clientRequests chan *Request, quit chan bool) {
     // Start handlers
     for i := 0; i &lt; MaxOutstanding; i++ {
         go handle(clientRequests)
@@ -2494,6 +2507,7 @@ One of the most important properties of Go is that
 a channel is a first-class value that can be allocated and passed
 around like any other.  A common use of this property is
 to implement safe, parallel demultiplexing.
+</p>
 <p>
 In the example in the previous section, <code>handle</code> was
 an idealized handler for a request but we didn't define the
@@ -2822,7 +2836,7 @@ func init() {
 
 <p>
 When <code>panic</code> is called, including implicitly for run-time
-errors such as indexing an array out of bounds or failing a type
+errors such as indexing a slice out of bounds or failing a type
 assertion, it immediately stops execution of the current function
 and begins unwinding the stack of the goroutine, running any deferred
 functions along the way.  If that unwinding reaches the top of the
@@ -2923,7 +2937,7 @@ that it has the local type <code>Error</code>.
 If it does not, the type assertion will fail, causing a run-time error
 that continues the stack unwinding as though nothing had interrupted
 it.  This check means that if something unexpected happens, such
-as an array index out of bounds, the code will fail even though we
+as an index out of bounds, the code will fail even though we
 are using <code>panic</code> and <code>recover</code> to handle
 user-triggered errors.
 </p>
@@ -2973,7 +2987,7 @@ for instance, a URL, saving you typing the URL into the phone's tiny keyboard.
 Here's the complete program.
 An explanation follows.
 </p>
-{{code "/doc/progs/eff_qr.go"}}
+{{code "/doc/progs/eff_qr.go" `/package/` `$`}}
 <p>
 The pieces up to <code>main</code> should be easy to follow.
 The one flag sets a default HTTP port for our server.  The template
@@ -2992,11 +3006,11 @@ server; it blocks while the server runs.
 executes the template on the data in the form value named <code>s</code>.
 </p>
 <p>
-The template package is powerful;
+The template package <code>html/template</code> is powerful;
 this program just touches on its capabilities.
-In essence, it rewrites a piece of text on the fly by substituting elements derived
+In essence, it rewrites a piece of HTML text on the fly by substituting elements derived
 from data items passed to <code>templ.Execute</code>, in this case the
-form value.  
+form value.
 Within the template text (<code>templateStr</code>),
 double-brace-delimited pieces denote template actions.
 The piece from <code>{{html "{{if .}}"}}</code>
@@ -3005,13 +3019,14 @@ is non-empty.
 That is, when the string is empty, this piece of the template is suppressed.
 </p>
 <p>
-The snippet <code>{{html "{{urlquery .}}"}}</code> says to process the data with the function
-<code>urlquery</code>, which sanitizes the query string
-for safe display on the web page.
+The two snippets <code>{{html "{{.}}"}}</code> say to show the data presented to
+the template—the query string—on the web page.
+The HTML template package automatically provides appropriate escaping so the
+text is safe to display.
 </p>
 <p>
 The rest of the template string is just the HTML to show when the page loads.
-If this is too quick an explanation, see the <a href="/pkg/text/template/">documentation</a>
+If this is too quick an explanation, see the <a href="/pkg/html/template/">documentation</a>
 for the template package for a more thorough discussion.
 </p>
 <p>
@@ -3025,7 +3040,7 @@ TODO
 <pre>
 verifying implementation
 type Color uint32
-    
+
 // Check that Color implements image.Color and image.Image
 var _ image.Color = Black
 var _ image.Image = Black

@@ -20,14 +20,16 @@ func Goexit()
 
 // Caller reports file and line number information about function invocations on
 // the calling goroutine's stack.  The argument skip is the number of stack frames
-// to ascend, with 0 identifying the caller of Caller.  The return values report the
+// to ascend, with 0 identifying the caller of Caller.  (For historical reasons the
+// meaning of skip differs between Caller and Callers.) The return values report the
 // program counter, file name, and line number within the file of the corresponding
 // call.  The boolean ok is false if it was not possible to recover the information.
 func Caller(skip int) (pc uintptr, file string, line int, ok bool)
 
 // Callers fills the slice pc with the program counters of function invocations
 // on the calling goroutine's stack.  The argument skip is the number of stack frames
-// to skip before recording in pc, with 0 starting at the caller of Callers.
+// to skip before recording in pc, with 0 identifying the frame for Callers itself and
+// 1 identifying the caller of Callers.
 // It returns the number of entries written to pc.
 func Callers(skip int, pc []uintptr) int
 
@@ -65,7 +67,7 @@ func (f *Func) FileLine(pc uintptr) (file string, line int) {
 // implemented in symtab.c
 func funcline_go(*Func, uintptr) (string, int)
 
-// mid returns the current os thread (m) id.
+// mid returns the current OS thread (m) id.
 func mid() uint32
 
 // SetFinalizer sets the finalizer associated with x to f.

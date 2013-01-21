@@ -72,6 +72,15 @@ typecheckrange(Node *n)
 	if(n->list->next)
 		v2 = n->list->next->n;
 
+	// this is not only a optimization but also a requirement in the spec.
+	// "if the second iteration variable is the blank identifier, the range
+	// clause is equivalent to the same clause with only the first variable
+	// present."
+	if(isblank(v2)) {
+		n->list = list1(v1);
+		v2 = N;
+	}
+
 	if(v1->defn == n)
 		v1->type = t1;
 	else if(v1->type != T && assignop(t1, v1->type, &why) == 0)
@@ -145,16 +154,21 @@ walkrange(Node *n)
 		if(v2) {
 			hp = temp(ptrto(n->type->type));
 			tmp = nod(OINDEX, ha, nodintconst(0));
-			tmp->etype = 1;	// no bounds check
+			tmp->bounded = 1;
 			init = list(init, nod(OAS, hp, nod(OADDR, tmp, N)));
 		}
 
 		n->ntest = nod(OLT, hv1, hn);
 		n->nincr = nod(OASOP, hv1, nodintconst(1));
 		n->nincr->etype = OADD;
-		body = list1(nod(OAS, v1, hv1));
-		if(v2) {
-			body = list(body, nod(OAS, v2, nod(OIND, hp, N)));
+		if(v2 == N)
+			body = list1(nod(OAS, v1, hv1));
+		else {
+			a = nod(OAS2, N, N);
+			a->list = list(list1(v1), v2);
+			a->rlist = list(list1(hv1), nod(OIND, hp, N));
+			body = list1(a);
+
 			tmp = nod(OADD, hp, nodintconst(t->type->width));
 			tmp->type = hp->type;
 			tmp->typecheck = 1;

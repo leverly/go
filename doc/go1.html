@@ -618,8 +618,6 @@ The packages in their new locations are:
 
 <ul>
 <li><code>old/netchan</code></li>
-<li><code>old/regexp</code></li>
-<li><code>old/template</code></li>
 </ul>
 
 <p>
@@ -639,6 +637,8 @@ Go 1 deletes several packages outright:
 <li><code>container/vector</code></li>
 <li><code>exp/datafmt</code></li>
 <li><code>go/typechecker</code></li>
+<li><code>old/regexp</code></li>
+<li><code>old/template</code></li>
 <li><code>try</code></li>
 </ul>
 
@@ -1253,14 +1253,13 @@ Since the package's functionality is new, no updating is necessary.
 <p>
 In Go 1 the <a href="/pkg/net/http/"><code>http</code></a> package is refactored,
 putting some of the utilities into a
-<a href="/pkg/net/httputil/"><code>httputil</code></a> subdirectory.
+<a href="/pkg/net/http/httputil/"><code>httputil</code></a> subdirectory.
 These pieces are only rarely needed by HTTP clients.
 The affected items are:
 </p>
 
 <ul>
 <li>ClientConn</li>
-<li>DumpRequest</li>
 <li>DumpRequest</li>
 <li>DumpRequestOut</li>
 <li>DumpResponse</li>
@@ -1677,7 +1676,7 @@ instead of a <code>Visitor</code> interface value.
 The <code>WalkFunc</code> function will be called even for files or directories that could not be opened;
 in such cases the error argument will describe the failure.
 If a directory's contents are to be skipped,
-the function should return the value <a href="/pkg/path/filepath/#variables"><code>filepath.SkipDir</code></a>
+the function should return the value <a href="/pkg/path/filepath/#pkg-variables"><code>filepath.SkipDir</code></a>
 </p>
 
 {{code "/doc/progs/go1.go" `/STARTWALK/` `/ENDWALK/`}}
@@ -1789,7 +1788,7 @@ for full details.
 <td colspan="2"><hr></td>
 </tr>
 <tr><td>Atoui(x)</td> <td>ParseUint(x, 10, 0)§</td></tr>
-<tr><td>Atoi64(x)</td> <td>ParseInt(x, 10, 64)</td></tr>
+<tr><td>Atoui64(x)</td> <td>ParseUint(x, 10, 64)</td></tr>
 <tr>
 <td colspan="2"><hr></td>
 </tr>
@@ -1866,7 +1865,7 @@ made easier with the new structure of the packages.
 The imports will be updated by fix tool.
 Single-template uses will be otherwise be largely unaffected.
 Code that uses multiple templates in concert will need to be updated by hand.
-The <a href="/pkg/text/template/#examples">examples</a> in
+The <a href="/pkg/text/template/#pkg-examples">examples</a> in
 the documentation for <code>text/template</code> can provide guidance.
 </p>
 

@@ -72,6 +72,8 @@ Lflag(char *arg)
 void
 libinit(void)
 {
+	char *race;
+
 	fmtinstall('i', iconv);
 	fmtinstall('Y', Yconv);
 	fmtinstall('Z', Zconv);
@@ -80,7 +82,10 @@ libinit(void)
 		print("goarch is not known: %s\n", goarch);
 
 	// add goroot to the end of the libdir list.
-	Lflag(smprint("%s/pkg/%s_%s", goroot, goos, goarch));
+	race = "";
+	if(flag_race)
+		race = "_race";
+	Lflag(smprint("%s/pkg/%s_%s%s", goroot, goos, goarch, race));
 
 	// Unix doesn't like it when we write to a running (or, sometimes,
 	// recently run) binary, so remove the output file before writing it.
@@ -281,6 +286,8 @@ loadlib(void)
 	loadinternal("runtime");
 	if(thechar == '5')
 		loadinternal("math");
+	if(flag_race)
+		loadinternal("runtime/race");
 
 	for(i=0; i<libraryp; i++) {
 		if(debug['v'])
@@ -302,6 +309,7 @@ loadlib(void)
 		debug['d'] = 1;
 	
 	importcycles();
+	sortdynexp();
 }
 
 /*
@@ -366,7 +374,7 @@ objfile(char *file, char *pkg)
 		return;
 	}
 	
-	/* skip over __.SYMDEF */
+	/* skip over __.GOSYMDEF */
 	off = Boffset(f);
 	if((l = nextar(f, off, &arhdr)) <= 0) {
 		diag("%s: short read on archive file symbol header", file);
@@ -402,7 +410,7 @@ objfile(char *file, char *pkg)
 	 * the individual symbols that are unused.
 	 *
 	 * loading every object will also make it possible to
-	 * load foreign objects not referenced by __.SYMDEF.
+	 * load foreign objects not referenced by __.GOSYMDEF.
 	 */
 	for(;;) {
 		l = nextar(f, off, &arhdr);
@@ -548,6 +556,36 @@ eof:
 	free(pn);
 }
 
+Sym*
+newsym(char *symb, int v)
+{
+	Sym *s;
+	int l;
+
+	l = strlen(symb) + 1;
+	s = mal(sizeof(*s));
+	if(debug['v'] > 1)
+		Bprint(&bso, "newsym %s\n", symb);
+
+	s->dynid = -1;
+	s->plt = -1;
+	s->got = -1;
+	s->name = mal(l + 1);
+	memmove(s->name, symb, l);
+
+	s->type = 0;
+	s->version = v;
+	s->value = 0;
+	s->sig = 0;
+	s->size = 0;
+	nsymbol++;
+
+	s->allsym = allsym;
+	allsym = s;
+
+	return s;
+}
+
 static Sym*
 _lookup(char *symb, int v, int creat)
 {
@@ -569,27 +607,10 @@ _lookup(char *symb, int v, int creat)
 	if(!creat)
 		return nil;
 
-	s = mal(sizeof(*s));
-	if(debug['v'] > 1)
-		Bprint(&bso, "lookup %s\n", symb);
-
-	s->dynid = -1;
-	s->plt = -1;
-	s->got = -1;
-	s->name = mal(l + 1);
-	memmove(s->name, symb, l);
-
+	s = newsym(symb, v);
 	s->hash = hash[h];
-	s->type = 0;
-	s->version = v;
-	s->value = 0;
-	s->sig = 0;
-	s->size = 0;
 	hash[h] = s;
-	nsymbol++;
 
-	s->allsym = allsym;
-	allsym = s;
 	return s;
 }
 
@@ -1472,9 +1493,121 @@ void
 cwrite(void *buf, int n)
 {
 	cflush();
+	if(n <= 0)
+		return;
 	if(write(cout, buf, n) != n) {
 		diag("write error: %r");
 		errorexit();
 	}
 	coutpos += n;
+}
+
+void
+usage(void)
+{
+	fprint(2, "usage: %cl [options] main.%c\n", thechar, thechar);
+	flagprint(2);
+	exits("usage");
+}
+
+void
+setheadtype(char *s)
+{
+	HEADTYPE = headtype(s);
+}
+
+void
+setinterp(char *s)
+{
+	debug['I'] = 1; // denote cmdline interpreter override
+	interpreter = s;
+}
+
+void
+doversion(void)
+{
+	print("%cl version %s\n", thechar, getgoversion());
+	errorexit();
+}
+
+void
+genasmsym(void (*put)(Sym*, char*, int, vlong, vlong, int, Sym*))
+{
+	Auto *a;
+	Sym *s;
+
+	// These symbols won't show up in the first loop below because we
+	// skip STEXT symbols. Normal STEXT symbols are emitted by walking textp.
+	s = lookup("text", 0);
+	if(s->type == STEXT)
+		put(s, s->name, 'T', s->value, s->size, s->version, 0);
+	s = lookup("etext", 0);
+	if(s->type == STEXT)
+		put(s, s->name, 'T', s->value, s->size, s->version, 0);
+
+	for(s=allsym; s!=S; s=s->allsym) {
+		if(s->hide)
+			continue;
+		switch(s->type&SMASK) {
+		case SCONST:
+		case SRODATA:
+		case SSYMTAB:
+		case SPCLNTAB:
+		case SDATA:
+		case SNOPTRDATA:
+		case SELFROSECT:
+		case SMACHOGOT:
+		case STYPE:
+		case SSTRING:
+		case SGOSTRING:
+		case SWINDOWS:
+		case SGCDATA:
+		case SGCBSS:
+			if(!s->reachable)
+				continue;
+			put(s, s->name, 'D', symaddr(s), s->size, s->version, s->gotype);
+			continue;
+
+		case SBSS:
+		case SNOPTRBSS:
+			if(!s->reachable)
+				continue;
+			if(s->np > 0)
+				diag("%s should not be bss (size=%d type=%d special=%d)", s->name, (int)s->np, s->type, s->special);
+			put(s, s->name, 'B', symaddr(s), s->size, s->version, s->gotype);
+			continue;
+
+		case SFILE:
+			put(nil, s->name, 'f', s->value, 0, s->version, 0);
+			continue;
+		}
+	}
+
+	for(s = textp; s != nil; s = s->next) {
+		if(s->text == nil)
+			continue;
+
+		/* filenames first */
+		for(a=s->autom; a; a=a->link)
+			if(a->type == D_FILE)
+				put(nil, a->asym->name, 'z', a->aoffset, 0, 0, 0);
+			else
+			if(a->type == D_FILE1)
+				put(nil, a->asym->name, 'Z', a->aoffset, 0, 0, 0);
+
+		put(s, s->name, 'T', s->value, s->size, s->version, s->gotype);
+
+		/* frame, auto and param after */
+		put(nil, ".frame", 'm', s->text->to.offset+PtrSize, 0, 0, 0);
+
+		for(a=s->autom; a; a=a->link)
+			if(a->type == D_AUTO)
+				put(nil, a->asym->name, 'a', -a->aoffset, 0, 0, a->gotype);
+			else
+			if(a->type == D_PARAM)
+				put(nil, a->asym->name, 'p', a->aoffset, 0, 0, a->gotype);
+	}
+	if(debug['v'] || debug['n'])
+		Bprint(&bso, "symsize = %ud\n", symsize);
+	Bflush(&bso);
 }

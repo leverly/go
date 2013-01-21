@@ -150,15 +150,34 @@ testdclstack(void)
 void
 redeclare(Sym *s, char *where)
 {
-	if(s->lastlineno == 0)
+	Strlit *pkgstr;
+	int line1, line2;
+
+	if(s->lastlineno == 0) {
+		pkgstr = s->origpkg ? s->origpkg->path : s->pkg->path;
 		yyerror("%S redeclared %s\n"
-			"\tprevious declaration during import",
-			s, where);
-	else
-		yyerror("%S redeclared %s\n"
+			"\tprevious declaration during import \"%Z\"",
+			s, where, pkgstr);
+	} else {
+		line1 = parserline();
+		line2 = s->lastlineno;
+		
+		// When an import and a declaration collide in separate files,
+		// present the import as the "redeclared", because the declaration
+		// is visible where the import is, but not vice versa.
+		// See issue 4510.
+		if(s->def == N) {
+			line2 = line1;
+			line1 = s->lastlineno;
+		}
+
+		yyerrorl(line1, "%S redeclared %s (%#N)\n"
 			"\tprevious declaration at %L",
-			s, where, s->lastlineno);
+			s, where, s->def, line2);
+	}
 }
+
+static int vargen;
 
 /*
  * declare individual names - var, typ, const
@@ -168,7 +187,10 @@ declare(Node *n, int ctxt)
 {
 	Sym *s;
 	int gen;
-	static int typegen, vargen;
+	static int typegen;
+	
+	if(ctxt == PDISCARD)
+		return;
 
 	if(isblank(n))
 		return;
@@ -179,6 +201,9 @@ declare(Node *n, int ctxt)
 	// kludgy: typecheckok means we're past parsing.  Eg genwrapper may declare out of package names later.
 	if(importpkg == nil && !typecheckok && s->pkg != localpkg)
 		yyerror("cannot declare name %S", s);
+
+	if(ctxt == PEXTERN && strcmp(s->name, "init") == 0)
+		yyerror("cannot declare init - must be func", s);
 
 	gen = 0;
 	if(ctxt == PEXTERN) {
@@ -192,7 +217,7 @@ declare(Node *n, int ctxt)
 			curfn->dcl = list(curfn->dcl, n);
 		if(n->op == OTYPE)
 			gen = ++typegen;
-		else if(n->op == ONAME)
+		else if(n->op == ONAME && ctxt == PAUTO && strstr(s->name, "·") == nil)
 			gen = ++vargen;
 		pushdcl(s);
 		n->curfn = curfn;
@@ -237,7 +262,7 @@ variter(NodeList *vl, Node *t, NodeList *el)
 
 	init = nil;
 	doexpr = el != nil;
-	
+
 	if(count(el) == 1 && count(vl) > 1) {
 		e = el->n;
 		as2 = nod(OAS2, N, N);
@@ -433,21 +458,6 @@ oldname(Sym *s)
 }
 
 /*
- * same for types
- */
-Type*
-newtype(Sym *s)
-{
-	Type *t;
-
-	t = typ(TFORW);
-	t->sym = s;
-	t->type = T;
-	return t;
-}
-
-
-/*
  * := declarations
  */
 
@@ -479,7 +489,7 @@ colasdefn(NodeList *left, Node *defn)
 		if(isblank(n))
 			continue;
 		if(!colasname(n)) {
-			yyerror("non-name %N on left side of :=", n);
+			yyerrorl(defn->lineno, "non-name %N on left side of :=", n);
 			nerr++;
 			continue;
 		}
@@ -494,11 +504,11 @@ colasdefn(NodeList *left, Node *defn)
 		l->n = n;
 	}
 	if(nnew == 0 && nerr == 0)
-		yyerror("no new variables on left side of :=");
+		yyerrorl(defn->lineno, "no new variables on left side of :=");
 }
 
 Node*
-colas(NodeList *left, NodeList *right)
+colas(NodeList *left, NodeList *right, int32 lno)
 {
 	Node *as;
 
@@ -506,6 +516,7 @@ colas(NodeList *left, NodeList *right)
 	as->list = left;
 	as->rlist = right;
 	as->colas = 1;
+	as->lineno = lno;
 	colasdefn(left, as);
 
 	// make the tree prettier; not necessary
@@ -530,7 +541,7 @@ ifacedcl(Node *n)
 	if(n->op != ODCLFIELD || n->right == N)
 		fatal("ifacedcl");
 
-	dclcontext = PAUTO;
+	dclcontext = PPARAM;
 	markdcl();
 	funcdepth++;
 	n->outer = curfn;
@@ -541,6 +552,7 @@ ifacedcl(Node *n)
 	// seen the body of a function but since an interface
 	// field declaration does not have a body, we must
 	// call it now to pop the current declaration context.
+	dclcontext = PAUTO;
 	funcbody(n);
 }
 
@@ -582,6 +594,11 @@ funcargs(Node *nt)
 	if(nt->op != OTFUNC)
 		fatal("funcargs %O", nt->op);
 
+	// re-start the variable generation number
+	// we want to use small numbers for the return variables,
+	// so let them have the chunk starting at 1.
+	vargen = count(nt->rlist);
+
 	// declare the receiver and in arguments.
 	// no n->defn because type checking of func header
 	// will not fill in the types until later
@@ -593,6 +610,8 @@ funcargs(Node *nt)
 			n->left->op = ONAME;
 			n->left->ntype = n->right;
 			declare(n->left, PPARAM);
+			if(dclcontext == PAUTO)
+				n->left->vargen = ++vargen;
 		}
 	}
 	for(l=nt->list; l; l=l->next) {
@@ -603,29 +622,45 @@ funcargs(Node *nt)
 			n->left->op = ONAME;
 			n->left->ntype = n->right;
 			declare(n->left, PPARAM);
+			if(dclcontext == PAUTO)
+				n->left->vargen = ++vargen;
 		}
 	}
 
 	// declare the out arguments.
-	gen = 0;
+	gen = count(nt->list);
+	int i = 0;
 	for(l=nt->rlist; l; l=l->next) {
 		n = l->n;
+
 		if(n->op != ODCLFIELD)
 			fatal("funcargs out %O", n->op);
-		if(n->left != N) {
-			n->left->op = ONAME;
-			n->left->ntype = n->right;
-			if(isblank(n->left)) {
-				// Give it a name so we can assign to it during return.
-				// preserve the original in ->orig
-				nn = nod(OXXX, N, N);
-				*nn = *n->left;
-				n->left = nn;
-				snprint(namebuf, sizeof(namebuf), ".anon%d", gen++);
-				n->left->sym = lookup(namebuf);
-			}
-			declare(n->left, PPARAMOUT);
+
+		if(n->left == N) {
+			// give it a name so escape analysis has nodes to work with
+			snprint(namebuf, sizeof(namebuf), "~anon%d", gen++);
+			n->left = newname(lookup(namebuf));
+			n->left->orig = N;  // signal that the original was absent
+
+		} 
+
+		n->left->op = ONAME;
+
+		if(isblank(n->left)) {
+			// Give it a name so we can assign to it during return.
+			// preserve the original in ->orig
+			nn = nod(OXXX, N, N);
+			*nn = *n->left;
+			n->left = nn;
+			
+			snprint(namebuf, sizeof(namebuf), "~anon%d", gen++);
+			n->left->sym = lookup(namebuf);
 		}
+
+		n->left->ntype = n->right;
+		declare(n->left, PPARAMOUT);
+		if(dclcontext == PAUTO)
+			n->left->vargen = ++i;
 	}
 }
 
@@ -780,7 +815,7 @@ structfield(Node *n)
 		break;
 	}
 
-	if(n->left && n->left->op == ONAME) {
+	if(n->left && n->left->op == ONAME && n->left->orig != N) {
 		f->nname = n->left;
 		f->embedded = n->embedded;
 		f->sym = f->nname->sym;
@@ -993,8 +1028,11 @@ embedded(Sym *s)
 		*utfrune(name, CenterDot) = 0;
 	}
 
-	if(exportname(name) || s->pkg == builtinpkg)  // old behaviour, tests pass, but is it correct?
+	if(exportname(name))
 		n = newname(lookup(name));
+	else if(s->pkg == builtinpkg && importpkg != nil)
+		// The name of embedded builtins during imports belongs to importpkg.
+		n = newname(pkglookup(name, importpkg));
 	else
 		n = newname(pkglookup(name, s->pkg));
 	n = nod(ODCLFIELD, n, oldname(s));
@@ -1156,7 +1194,7 @@ functype(Node *this, NodeList *in, NodeList *out)
 		t->thistuple = 1;
 	t->outtuple = count(out);
 	t->intuple = count(in);
-	t->outnamed = t->outtuple > 0 && out->n->left != N;
+	t->outnamed = t->outtuple > 0 && out->n->left != N && out->n->left->orig != N;
 
 	return t;
 }
@@ -1264,7 +1302,7 @@ methodname1(Node *n, Node *t)
  * n is fieldname, pa is base type, t is function type
  */
 void
-addmethod(Sym *sf, Type *t, int local)
+addmethod(Sym *sf, Type *t, int local, int nointerface)
 {
 	Type *f, *d, *pa;
 	Node *n;
@@ -1311,7 +1349,7 @@ addmethod(Sym *sf, Type *t, int local)
 		}
 		// Should have picked off all the reasons above,
 		// but just in case, fall back to generic error.
-		yyerror("invalid receiver type %T", pa);
+		yyerror("invalid receiver type %T (%lT / %lT)", pa, pa, t);
 		return;
 	}
 
@@ -1347,6 +1385,7 @@ addmethod(Sym *sf, Type *t, int local)
 	}
 
 	f = structfield(n);
+	f->nointerface = nointerface;
 
 	// during import unexported method names should be in the type's package
 	if(importpkg && f->sym && !exportname(f->sym->name) && f->sym->pkg != structpkg)

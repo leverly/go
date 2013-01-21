@@ -36,12 +36,14 @@ type Package struct {
 	Root       string `json:",omitempty"` // Go root or Go path dir containing this package
 
 	// Source files
-	GoFiles   []string `json:",omitempty"` // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
-	CgoFiles  []string `json:",omitempty"` // .go sources files that import "C"
-	CFiles    []string `json:",omitempty"` // .c source files
-	HFiles    []string `json:",omitempty"` // .h source files
-	SFiles    []string `json:",omitempty"` // .s source files
-	SysoFiles []string `json:",omitempty"` // .syso system object files added to package
+	GoFiles      []string `json:",omitempty"` // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+	CgoFiles     []string `json:",omitempty"` // .go sources files that import "C"
+	CFiles       []string `json:",omitempty"` // .c source files
+	HFiles       []string `json:",omitempty"` // .h source files
+	SFiles       []string `json:",omitempty"` // .s source files
+	SysoFiles    []string `json:",omitempty"` // .syso system object files added to package
+	SwigFiles    []string `json:",omitempty"` // .swig files
+	SwigCXXFiles []string `json:",omitempty"` // .swigcxx files
 
 	// Cgo directives
 	CgoCFLAGS    []string `json:",omitempty"` // cgo: flags for C compiler
@@ -94,6 +96,8 @@ func (p *Package) copyBuild(pp *build.Package) {
 	p.HFiles = pp.HFiles
 	p.SFiles = pp.SFiles
 	p.SysoFiles = pp.SysoFiles
+	p.SwigFiles = pp.SwigFiles
+	p.SwigCXXFiles = pp.SwigCXXFiles
 	p.CgoCFLAGS = pp.CgoCFLAGS
 	p.CgoLDFLAGS = pp.CgoLDFLAGS
 	p.CgoPkgConfig = pp.CgoPkgConfig
@@ -246,7 +250,7 @@ func reusePackage(p *Package, stk *importStack) *Package {
 		if p.Error == nil {
 			p.Error = &PackageError{
 				ImportStack: stk.copy(),
-				Err:         "import loop",
+				Err:         "import cycle not allowed",
 			}
 		}
 		p.Incomplete = true
@@ -260,13 +264,11 @@ func reusePackage(p *Package, stk *importStack) *Package {
 // isGoTool is the list of directories for Go programs that are installed in
 // $GOROOT/pkg/tool.
 var isGoTool = map[string]bool{
-	"cmd/api":      true,
-	"cmd/cgo":      true,
-	"cmd/fix":      true,
-	"cmd/vet":      true,
-	"cmd/yacc":     true,
-	"exp/gotype":   true,
-	"exp/ebnflint": true,
+	"cmd/api":  true,
+	"cmd/cgo":  true,
+	"cmd/fix":  true,
+	"cmd/vet":  true,
+	"cmd/yacc": true,
 }
 
 // expandScanner expands a scanner.List error into all the errors in the list.
@@ -317,7 +319,7 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 			elem = full
 		}
 		p.target = filepath.Join(p.build.BinDir, elem)
-		if p.Goroot && isGoTool[p.ImportPath] {
+		if p.Goroot && (isGoTool[p.ImportPath] || strings.HasPrefix(p.ImportPath, "exp/")) {
 			p.target = filepath.Join(gorootPkg, "tool", full)
 		}
 		if buildContext.GOOS == "windows" {
@@ -340,6 +342,11 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 	// Everything depends on runtime, except runtime and unsafe.
 	if !p.Standard || (p.ImportPath != "runtime" && p.ImportPath != "unsafe") {
 		importPaths = append(importPaths, "runtime")
+		// When race detection enabled everything depends on runtime/race.
+		// Exclude runtime/cgo and cmd/cgo to avoid circular dependencies.
+		if buildRace && (!p.Standard || (p.ImportPath != "runtime/race" && p.ImportPath != "runtime/cgo" && p.ImportPath != "cmd/cgo")) {
+			importPaths = append(importPaths, "runtime/race")
+		}
 	}
 
 	// Build list of full paths to all Go files in the package,
@@ -408,6 +415,29 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 	return p
 }
 
+// usesSwig returns whether the package needs to run SWIG.
+func (p *Package) usesSwig() bool {
+	return len(p.SwigFiles) > 0 || len(p.SwigCXXFiles) > 0
+}
+
+// swigSoname returns the name of the shared library we create for a
+// SWIG input file.
+func (p *Package) swigSoname(file string) string {
+	return strings.Replace(p.ImportPath, "/", "-", -1) + "-" + strings.Replace(file, ".", "-", -1) + ".so"
+}
+
+// swigDir returns the name of the shared SWIG directory for a
+// package.
+func (p *Package) swigDir(ctxt *build.Context) string {
+	dir := p.build.PkgRoot
+	if ctxt.Compiler == "gccgo" {
+		dir = filepath.Join(dir, "gccgo")
+	} else {
+		dir = filepath.Join(dir, ctxt.GOOS+"_"+ctxt.GOARCH)
+	}
+	return filepath.Join(dir, "swig")
+}
+
 // packageList returns the list of packages in the dag rooted at roots
 // as visited in a depth-first post-order traversal.
 func packageList(roots []*Package) []*Package {
@@ -459,7 +489,7 @@ func isStale(p *Package, topRoot map[string]bool) bool {
 	// distributions of Go packages, although such binaries are
 	// only useful with the specific version of the toolchain that
 	// created them.
-	if len(p.gofiles) == 0 {
+	if len(p.gofiles) == 0 && !p.usesSwig() {
 		return false
 	}
 
@@ -491,14 +521,19 @@ func isStale(p *Package, topRoot map[string]bool) bool {
 	// As a courtesy to developers installing new versions of the compiler
 	// frequently, define that packages are stale if they are
 	// older than the compiler, and commands if they are older than
-	// the linker.  This heuristic will not work if the binaries are back-dated,
-	// as some binary distributions may do, but it does handle a very
-	// common case.  See issue 3036.
-	if olderThan(buildToolchain.compiler()) {
-		return true
-	}
-	if p.build.IsCommand() && olderThan(buildToolchain.linker()) {
-		return true
+	// the linker.  This heuristic will not work if the binaries are
+	// back-dated, as some binary distributions may do, but it does handle
+	// a very common case.
+	// See issue 3036.
+	// Assume code in $GOROOT is up to date, since it may not be writeable.
+	// See issue 4106.
+	if p.Root != goroot {
+		if olderThan(buildToolchain.compiler()) {
+			return true
+		}
+		if p.build.IsCommand() && olderThan(buildToolchain.linker()) {
+			return true
+		}
 	}
 
 	// Have installed copy, probably built using current compilers,
@@ -518,6 +553,21 @@ func isStale(p *Package, topRoot map[string]bool) bool {
 	srcs := stringList(p.GoFiles, p.CFiles, p.HFiles, p.SFiles, p.CgoFiles, p.SysoFiles)
 	for _, src := range srcs {
 		if olderThan(filepath.Join(p.Dir, src)) {
+			return true
+		}
+	}
+
+	for _, src := range stringList(p.SwigFiles, p.SwigCXXFiles) {
+		if olderThan(filepath.Join(p.Dir, src)) {
+			return true
+		}
+		soname := p.swigSoname(src)
+		fi, err := os.Stat(soname)
+		if err != nil {
+			return true
+		}
+		fiSrc, err := os.Stat(src)
+		if err != nil || fiSrc.ModTime().After(fi.ModTime()) {
 			return true
 		}
 	}
@@ -552,7 +602,7 @@ func loadPackage(arg string, stk *importStack) *Package {
 		}
 		stk.push(arg)
 		defer stk.pop()
-		bp, err := build.ImportDir(filepath.Join(gorootSrc, arg), 0)
+		bp, err := buildContext.ImportDir(filepath.Join(gorootSrc, arg), 0)
 		bp.ImportPath = arg
 		bp.Goroot = true
 		bp.BinDir = gorootBin
@@ -580,7 +630,7 @@ func loadPackage(arg string, stk *importStack) *Package {
 	// referring to io/ioutil rather than a hypothetical import of
 	// "./ioutil".
 	if build.IsLocalImport(arg) {
-		bp, _ := build.ImportDir(filepath.Join(cwd, arg), build.FindOnly)
+		bp, _ := buildContext.ImportDir(filepath.Join(cwd, arg), build.FindOnly)
 		if bp.ImportPath != "" && bp.ImportPath != "." {
 			arg = bp.ImportPath
 		}
@@ -621,10 +671,14 @@ func packagesAndErrors(args []string) []*Package {
 	args = importPaths(args)
 	var pkgs []*Package
 	var stk importStack
-	for _, arg := range args {
-		pkgs = append(pkgs, loadPackage(arg, &stk))
-	}
+	var set = make(map[string]bool)
 
+	for _, arg := range args {
+		if !set[arg] {
+			pkgs = append(pkgs, loadPackage(arg, &stk))
+			set[arg] = true
+		}
+	}
 	computeStale(pkgs...)
 
 	return pkgs

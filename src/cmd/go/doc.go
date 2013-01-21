@@ -76,7 +76,12 @@ The build flags are shared by the build, install, run, and test commands:
 		do not delete it when exiting.
 	-x
 		print the commands.
+	-race
+		enable data race detection.
+		Supported only on linux/amd64, darwin/amd64 and windows/amd64.
 
+	-ccflags 'arg list'
+		arguments to pass on each 5c, 6c, or 8c compiler invocation
 	-compiler name
 		name of compiler to use, as in runtime.Compiler (gccgo or gc)
 	-gccgoflags 'arg list'
@@ -121,6 +126,7 @@ source directories corresponding to the import paths:
 	DIR(.exe)        from go build
 	DIR.test(.exe)   from go test -c
 	MAINFILE(.exe)   from go build MAINFILE.go
+	*.so             from SWIG
 
 In the list, DIR represents the final path element of the
 directory, and MAINFILE is the base name of any Go source
@@ -145,13 +151,16 @@ Run godoc on package sources
 
 Usage:
 
-	go doc [packages]
+	go doc [-n] [-x] [packages]
 
 Doc runs the godoc command on the packages named by the
 import paths.
 
 For more about godoc, see 'godoc godoc'.
 For more about specifying packages, see 'go help packages'.
+
+The -n flag prints commands that would be executed.
+The -x flag prints commands as they are executed.
 
 To run godoc with specific options, run godoc itself.
 
@@ -192,13 +201,16 @@ Run gofmt on package sources
 
 Usage:
 
-	go fmt [packages]
+	go fmt [-n] [-x] [packages]
 
 Fmt runs the command 'gofmt -l -w' on the packages named
 by the import paths.  It prints the names of the files that are modified.
 
 For more about gofmt, see 'godoc gofmt'.
 For more about specifying packages, see 'go help packages'.
+
+The -n flag prints commands that would be executed.
+The -x flag prints commands as they are executed.
 
 To run gofmt with specific options, run gofmt itself.
 
@@ -227,15 +239,11 @@ The -u flag instructs get to use the network to update the named packages
 and their dependencies.  By default, get uses the network to check out
 missing packages but does not use it to look for updates to existing packages.
 
-When checking out or updating a package, get looks for a branch or
-tag that matches the locally installed version of Go. If the local
-version "is release.rNN", it searches for "go.rNN". (For an
-installation using Go version "weekly.YYYY-MM-DD", it searches for a
-package version labeled "go.YYYY-MM-DD".)  If the desired version
-cannot be found but others exist with labels in the correct format,
-get retrieves the most recent version before the desired label.
-Finally, if all else fails it retrieves the most recent version of
-the package.
+When checking out or updating a package, get looks for a branch or tag
+that matches the locally installed version of Go. The most important
+rule is that if the local installation is running version "go1", get
+searches for a branch or tag named "go1". If no such version exists it
+retrieves the most recent version of the package.
 
 For more about specifying packages, see 'go help packages'.
 
@@ -274,10 +282,10 @@ The default output shows the package import path:
     code.google.com/p/goauth2/oauth
     code.google.com/p/sqlite
 
-The -f flag specifies an alternate format for the list,
-using the syntax of package template.  The default output
-is equivalent to -f '{{.ImportPath}}'.  The struct
-being passed to the template is:
+The -f flag specifies an alternate format for the list, using the
+syntax of package template.  The default output is equivalent to -f
+'{{.ImportPath}}'.  One extra template function is available, "join",
+which calls strings.Join. The struct being passed to the template is:
 
     type Package struct {
         Dir        string // directory containing package sources
@@ -291,12 +299,14 @@ being passed to the template is:
         Root       string // Go root or Go path dir containing this package
 
         // Source files
-        GoFiles  []string  // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
-        CgoFiles []string  // .go sources files that import "C"
-        CFiles   []string  // .c source files
-        HFiles   []string  // .h source files
-        SFiles   []string  // .s source files
-        SysoFiles []string // .syso object files to add to archive
+        GoFiles  []string     // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+        CgoFiles []string     // .go sources files that import "C"
+        CFiles   []string     // .c source files
+        HFiles   []string     // .h source files
+        SFiles   []string     // .s source files
+        SysoFiles []string    // .syso object files to add to archive
+        SwigFiles []string    // .swig files
+        SwigCXXFiles []string // .swigcxx files
 
         // Cgo directives
         CgoCFLAGS    []string // cgo: flags for C compiler
@@ -418,7 +428,7 @@ Run go tool vet on packages
 
 Usage:
 
-	go vet [packages]
+	go vet [-n] [-x] [packages]
 
 Vet runs the Go vet command on the packages named by the import paths.
 
@@ -426,6 +436,9 @@ For more about vet, see 'godoc vet'.
 For more about specifying packages, see 'go help packages'.
 
 To run the vet tool with specific options, run 'go tool vet'.
+
+The -n flag prints commands that would be executed.
+The -x flag prints commands as they are executed.
 
 See also: go fmt, go fix.
 
@@ -440,7 +453,7 @@ On Unix, the value is a colon-separated string.
 On Windows, the value is a semicolon-separated string.
 On Plan 9, the value is a list.
 
-GOPATH must be set to build and install packages outside the
+GOPATH must be set to get, build and install packages outside the
 standard Go tree.
 
 Each directory listed in GOPATH must have a prescribed structure:
@@ -486,7 +499,7 @@ Here's an example directory layout:
                     bar.a          (installed package object)
 
 Go searches each directory listed in GOPATH to find source code,
-but new packages are always downloaded into the first directory 
+but new packages are always downloaded into the first directory
 in the list.
 
 
@@ -504,13 +517,13 @@ denotes the package in that directory.
 
 Otherwise, the import path P denotes the package found in
 the directory DIR/src/P for some DIR listed in the GOPATH
-environment variable (see 'go help gopath'). 
+environment variable (see 'go help gopath').
 
 If no import paths are given, the action applies to the
 package in the current directory.
 
 The special import path "all" expands to all package directories
-found in all the GOPATH trees.  For example, 'go list all' 
+found in all the GOPATH trees.  For example, 'go list all'
 lists all the packages on the local system.
 
 The special import path "std" is like all but expands to just the
@@ -541,7 +554,7 @@ in those files and ignoring any other files in the directory.
 
 Remote import path syntax
 
-An import path (see 'go help importpath') denotes a package
+An import path (see 'go help packages') denotes a package
 stored in the local file system.  Certain import paths also
 describe how to obtain the source code for the package using
 a revision control system.
@@ -618,7 +631,7 @@ The meta tag has the form:
 
 	<meta name="go-import" content="import-prefix vcs repo-root">
 
-The import-prefix is the import path correponding to the repository
+The import-prefix is the import path corresponding to the repository
 root. It must be a prefix or an exact match of the package being
 fetched with "go get". If it's not an exact match, another http
 request is made at the prefix to verify the <meta> tags match.
@@ -672,6 +685,9 @@ directory containing the package sources, has its own flags:
 	    Run benchmarks matching the regular expression.
 	    By default, no benchmarks run.
 
+	-test.benchmem
+	    Print memory allocation statistics for benchmarks.
+
 	-test.cpuprofile cpu.out
 	    Write a CPU profile to the specified file before exiting.
 
@@ -687,6 +703,18 @@ directory containing the package sources, has its own flags:
 	    garbage collector, provided the test can run in the available
 	    memory without garbage collection.
 
+	-test.blockprofile block.out
+	    Write a goroutine blocking profile to the specified file
+	    when all tests are complete.
+
+	-test.blockprofilerate n
+	    Control the detail provided in goroutine blocking profiles by setting
+	    runtime.BlockProfileRate to n.  See 'godoc runtime BlockProfileRate'.
+	    The profiler aims to sample, on average, one blocking event every
+	    n nanoseconds the program spends blocked.  By default,
+	    if -test.blockprofile is set without this flag, all blocking events
+	    are recorded, equivalent to -test.blockprofilerate=1.
+
 	-test.parallel n
 	    Allow parallel execution of test functions that call t.Parallel.
 	    The value of this flag is the maximum number of tests to run
@@ -701,8 +729,8 @@ directory containing the package sources, has its own flags:
 	-test.timeout t
 		If a test runs longer than t, panic.
 
-	-test.benchtime n
-		Run enough iterations of each benchmark to take n seconds.
+	-test.benchtime t
+		Run enough iterations of each benchmark to take t.
 		The default is 1 second.
 
 	-test.cpu 1,2,4

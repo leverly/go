@@ -128,9 +128,9 @@ zaddr(Biobuf *b, Addr *a, int s)
 		break;
 
 	case D_BRANCH:
-		if(a->branch == nil)
+		if(a->u.branch == nil)
 			fatal("unpatched branch");
-		a->offset = a->branch->loc;
+		a->offset = a->u.branch->loc;
 		l = a->offset;
 		Bputc(b, l);
 		Bputc(b, l>>8);
@@ -139,7 +139,7 @@ zaddr(Biobuf *b, Addr *a, int s)
 		break;
 
 	case D_SCONST:
-		n = a->sval;
+		n = a->u.sval;
 		for(i=0; i<NSNAME; i++) {
 			Bputc(b, *n);
 			n++;
@@ -147,11 +147,12 @@ zaddr(Biobuf *b, Addr *a, int s)
 		break;
 
 	case D_REGREG:
+	case D_REGREG2:
 		Bputc(b, a->offset);
 		break;
 
 	case D_FCONST:
-		ieeedtod(&e, a->dval);
+		ieeedtod(&e, a->u.dval);
 		l = e;
 		Bputc(b, l);
 		Bputc(b, l>>8);
@@ -198,7 +199,8 @@ dumpfuncs(void)
 		if(isblank(pl->name))
 			continue;
 
-		if(debug['S']) {
+		// -S prints code; -SS prints code and data
+		if(debug['S'] && (pl->name || debug['S']>1)) {
 			s = S;
 			if(pl->name != N)
 				s = pl->name->sym;
@@ -287,7 +289,7 @@ dsname(Sym *sym, int off, char *t, int n)
 	p->to.name = D_NONE;
 	p->to.reg = NREG;
 	p->to.offset = 0;
-	memmove(p->to.sval, t, n);
+	memmove(p->to.u.sval, t, n);
 	return off + n;
 }
 
@@ -371,13 +373,13 @@ gdatacomplex(Node *nam, Mpcplx *cval)
 	p = gins(ADATA, nam, N);
 	p->reg = w;
 	p->to.type = D_FCONST;
-	p->to.dval = mpgetflt(&cval->real);
+	p->to.u.dval = mpgetflt(&cval->real);
 
 	p = gins(ADATA, nam, N);
 	p->reg = w;
 	p->from.offset += w;
 	p->to.type = D_FCONST;
-	p->to.dval = mpgetflt(&cval->imag);
+	p->to.u.dval = mpgetflt(&cval->imag);
 }
 
 void

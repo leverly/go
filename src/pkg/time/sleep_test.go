@@ -54,9 +54,10 @@ func TestAfterStress(t *testing.T) {
 	go func() {
 		for atomic.LoadUint32(&stop) == 0 {
 			runtime.GC()
-			// Need to yield, because otherwise
-			// the main goroutine will never set the stop flag.
-			runtime.Gosched()
+			// Yield so that the OS can wake up the timer thread,
+			// so that it can generate channel sends for the main goroutine,
+			// which will eventually set stop = 1 for us.
+			Sleep(Nanosecond)
 		}
 	}()
 	c := Tick(1)
@@ -222,4 +223,50 @@ func TestTimerStopStress(t *testing.T) {
 		}(i)
 	}
 	Sleep(3 * Second)
+}
+
+func TestSleepZeroDeadlock(t *testing.T) {
+	// Sleep(0) used to hang, the sequence of events was as follows.
+	// Sleep(0) sets G's status to Gwaiting, but then immediately returns leaving the status.
+	// Then the goroutine calls e.g. new and falls down into the scheduler due to pending GC.
+	// After the GC nobody wakes up the goroutine from Gwaiting status.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
+	c := make(chan bool)
+	go func() {
+		for i := 0; i < 100; i++ {
+			runtime.GC()
+		}
+		c <- true
+	}()
+	for i := 0; i < 100; i++ {
+		Sleep(0)
+		tmp := make(chan bool, 1)
+		tmp <- true
+		<-tmp
+	}
+	<-c
+}
+
+func TestReset(t *testing.T) {
+	t0 := NewTimer(100 * Millisecond)
+	Sleep(50 * Millisecond)
+	if t0.Reset(150*Millisecond) != true {
+		t.Fatalf("resetting unfired timer returned false")
+	}
+	Sleep(100 * Millisecond)
+	select {
+	case <-t0.C:
+		t.Fatalf("timer fired early")
+	default:
+	}
+	Sleep(100 * Millisecond)
+	select {
+	case <-t0.C:
+	default:
+		t.Fatalf("reset timer did not fire")
+	}
+
+	if t0.Reset(50*Millisecond) != false {
+		t.Fatalf("resetting expired timer returned true")
+	}
 }
