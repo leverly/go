@@ -22,12 +22,15 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,27 +38,32 @@ import (
 
 // Flags
 var (
-	checkFile = flag.String("c", "", "optional filename to check API against")
-	verbose   = flag.Bool("v", false, "Verbose debugging")
+	// TODO(bradfitz): once Go 1.1 comes out, allow the -c flag to take a comma-separated
+	// list of files, rather than just one.
+	checkFile  = flag.String("c", "", "optional filename to check API against")
+	allowNew   = flag.Bool("allow_new", true, "allow API additions")
+	exceptFile = flag.String("except", "", "optional filename of packages that are allowed to change without triggering a failure in the tool")
+	nextFile   = flag.String("next", "", "optional filename of tentative upcoming API features for the next release. This file can be lazily maintained. It only affects the delta warnings from the -c file printed on success.")
+	verbose    = flag.Bool("v", false, "verbose debugging")
+	forceCtx   = flag.String("contexts", "", "optional comma-separated list of <goos>-<goarch>[-cgo] to override default contexts.")
 )
 
+// contexts are the default contexts which are scanned, unless
+// overridden by the -contexts flag.
 var contexts = []*build.Context{
 	{GOOS: "linux", GOARCH: "386", CgoEnabled: true},
 	{GOOS: "linux", GOARCH: "386"},
 	{GOOS: "linux", GOARCH: "amd64", CgoEnabled: true},
 	{GOOS: "linux", GOARCH: "amd64"},
+	{GOOS: "linux", GOARCH: "arm"},
 	{GOOS: "darwin", GOARCH: "386", CgoEnabled: true},
 	{GOOS: "darwin", GOARCH: "386"},
 	{GOOS: "darwin", GOARCH: "amd64", CgoEnabled: true},
 	{GOOS: "darwin", GOARCH: "amd64"},
 	{GOOS: "windows", GOARCH: "amd64"},
 	{GOOS: "windows", GOARCH: "386"},
-}
-
-func init() {
-	for _, c := range contexts {
-		c.Compiler = build.Default.Compiler
-	}
+	{GOOS: "freebsd", GOARCH: "amd64"},
+	{GOOS: "freebsd", GOARCH: "386"},
 }
 
 func contextName(c *build.Context) string {
@@ -66,8 +74,48 @@ func contextName(c *build.Context) string {
 	return s
 }
 
+func parseContext(c string) *build.Context {
+	parts := strings.Split(c, "-")
+	if len(parts) < 2 {
+		log.Fatalf("bad context: %q", c)
+	}
+	bc := &build.Context{
+		GOOS:   parts[0],
+		GOARCH: parts[1],
+	}
+	if len(parts) == 3 {
+		if parts[2] == "cgo" {
+			bc.CgoEnabled = true
+		} else {
+			log.Fatalf("bad context: %q", c)
+		}
+	}
+	return bc
+}
+
+func setContexts() {
+	contexts = []*build.Context{}
+	for _, c := range strings.Split(*forceCtx, ",") {
+		contexts = append(contexts, parseContext(c))
+	}
+}
+
 func main() {
 	flag.Parse()
+
+	if !strings.Contains(runtime.Version(), "weekly") && !strings.Contains(runtime.Version(), "devel") {
+		if *nextFile != "" {
+			fmt.Printf("Go version is %q, ignoring -next %s\n", runtime.Version(), *nextFile)
+			*nextFile = ""
+		}
+	}
+
+	if *forceCtx != "" {
+		setContexts()
+	}
+	for _, c := range contexts {
+		c.Compiler = build.Default.Compiler
+	}
 
 	var pkgs []string
 	if flag.NArg() > 0 {
@@ -121,47 +169,120 @@ func main() {
 			features = append(features, f2)
 		}
 	}
-	sort.Strings(features)
+
+	fail := false
+	defer func() {
+		if fail {
+			os.Exit(1)
+		}
+	}()
 
 	bw := bufio.NewWriter(os.Stdout)
 	defer bw.Flush()
 
-	if *checkFile != "" {
-		bs, err := ioutil.ReadFile(*checkFile)
-		if err != nil {
-			log.Fatalf("Error reading file %s: %v", *checkFile, err)
-		}
-		v1 := strings.Split(strings.TrimSpace(string(bs)), "\n")
-		sort.Strings(v1)
-		v2 := features
-		take := func(sl *[]string) string {
-			s := (*sl)[0]
-			*sl = (*sl)[1:]
-			return s
-		}
-		changes := false
-		for len(v1) > 0 || len(v2) > 0 {
-			switch {
-			case len(v2) == 0 || v1[0] < v2[0]:
-				fmt.Fprintf(bw, "-%s\n", take(&v1))
-				changes = true
-			case len(v1) == 0 || v1[0] > v2[0]:
-				fmt.Fprintf(bw, "+%s\n", take(&v2))
-				changes = true
-			default:
-				take(&v1)
-				take(&v2)
-			}
-		}
-		if changes {
-			bw.Flush()
-			os.Exit(1)
-		}
-	} else {
+	if *checkFile == "" {
+		sort.Strings(features)
 		for _, f := range features {
 			fmt.Fprintf(bw, "%s\n", f)
 		}
+		return
 	}
+
+	required := fileFeatures(*checkFile)
+	optional := fileFeatures(*nextFile)
+	exception := fileFeatures(*exceptFile)
+	fail = !compareAPI(bw, features, required, optional, exception)
+}
+
+func set(items []string) map[string]bool {
+	s := make(map[string]bool)
+	for _, v := range items {
+		s[v] = true
+	}
+	return s
+}
+
+var spaceParensRx = regexp.MustCompile(` \(\S+?\)`)
+
+func featureWithoutContext(f string) string {
+	if !strings.Contains(f, "(") {
+		return f
+	}
+	return spaceParensRx.ReplaceAllString(f, "")
+}
+
+func compareAPI(w io.Writer, features, required, optional, exception []string) (ok bool) {
+	ok = true
+
+	optionalSet := set(optional)
+	exceptionSet := set(exception)
+	featureSet := set(features)
+
+	sort.Strings(features)
+	sort.Strings(required)
+
+	take := func(sl *[]string) string {
+		s := (*sl)[0]
+		*sl = (*sl)[1:]
+		return s
+	}
+
+	for len(required) > 0 || len(features) > 0 {
+		switch {
+		case len(features) == 0 || (len(required) > 0 && required[0] < features[0]):
+			feature := take(&required)
+			if exceptionSet[feature] {
+				fmt.Fprintf(w, "~%s\n", feature)
+			} else if featureSet[featureWithoutContext(feature)] {
+				// okay.
+			} else {
+				fmt.Fprintf(w, "-%s\n", feature)
+				ok = false // broke compatibility
+			}
+		case len(required) == 0 || (len(features) > 0 && required[0] > features[0]):
+			newFeature := take(&features)
+			if optionalSet[newFeature] {
+				// Known added feature to the upcoming release.
+				// Delete it from the map so we can detect any upcoming features
+				// which were never seen.  (so we can clean up the nextFile)
+				delete(optionalSet, newFeature)
+			} else {
+				fmt.Fprintf(w, "+%s\n", newFeature)
+				if !*allowNew {
+					ok = false // we're in lock-down mode for next release
+				}
+			}
+		default:
+			take(&required)
+			take(&features)
+		}
+	}
+
+	// In next file, but not in API.
+	var missing []string
+	for feature := range optionalSet {
+		missing = append(missing, feature)
+	}
+	sort.Strings(missing)
+	for _, feature := range missing {
+		fmt.Fprintf(w, "±%s\n", feature)
+	}
+	return
+}
+
+func fileFeatures(filename string) []string {
+	if filename == "" {
+		return nil
+	}
+	bs, err := ioutil.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("Error reading file %s: %v", filename, err)
+	}
+	text := strings.TrimSpace(string(bs))
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
 }
 
 // pkgSymbol represents a symbol in a package
@@ -170,10 +291,11 @@ type pkgSymbol struct {
 	symbol string // "RoundTripper"
 }
 
+var fset = token.NewFileSet()
+
 type Walker struct {
 	context         *build.Context
 	root            string
-	fset            *token.FileSet
 	scope           []string
 	features        map[string]bool // set
 	lastConstType   string
@@ -190,7 +312,6 @@ type Walker struct {
 
 func NewWalker() *Walker {
 	return &Walker{
-		fset:            token.NewFileSet(),
 		features:        make(map[string]bool),
 		packageState:    make(map[string]loadState),
 		interfaces:      make(map[pkgSymbol]*ast.InterfaceType),
@@ -210,20 +331,6 @@ const (
 	loading
 	loaded
 )
-
-// hardCodedConstantType is a hack until the type checker is sufficient for our needs.
-// Rather than litter the code with unnecessary type annotations, we'll hard-code
-// the cases we can't handle yet.
-func (w *Walker) hardCodedConstantType(name string) (typ string, ok bool) {
-	switch w.scope[0] {
-	case "pkg syscall":
-		switch name {
-		case "darwinAMD64":
-			return "bool", true
-		}
-	}
-	return "", false
-}
 
 func (w *Walker) Features() (fs []string) {
 	for f := range w.features {
@@ -245,6 +352,21 @@ func fileDeps(f *ast.File) (pkgs []string) {
 		}
 	}
 	return
+}
+
+var parsedFileCache = make(map[string]*ast.File)
+
+func parseFile(filename string) (*ast.File, error) {
+	f, ok := parsedFileCache[filename]
+	if !ok {
+		var err error
+		f, err = parser.ParseFile(fset, filename, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		parsedFileCache[filename] = f
+	}
+	return clone(f).(*ast.File), nil
 }
 
 // WalkPackage walks all files in package `name'.
@@ -280,7 +402,7 @@ func (w *Walker) WalkPackage(name string) {
 
 	files := append(append([]string{}, info.GoFiles...), info.CgoFiles...)
 	for _, file := range files {
-		f, err := parser.ParseFile(w.fset, filepath.Join(dir, file), nil, 0)
+		f, err := parseFile(filepath.Join(dir, file))
 		if err != nil {
 			log.Fatalf("error parsing package %s, file %s: %v", name, file, err)
 		}
@@ -415,7 +537,7 @@ func (w *Walker) walkFile(file *ast.File) {
 			// Ignore. Handled in subsequent pass, by go/doc.
 		default:
 			log.Printf("unhandled %T, %#v\n", di, di)
-			printer.Fprint(os.Stderr, w.fset, di)
+			printer.Fprint(os.Stderr, fset, di)
 			os.Stderr.Write([]byte("\n"))
 		}
 	}
@@ -476,6 +598,10 @@ func (w *Walker) constValueType(vi interface{}) (string, error) {
 		}
 		return constDepPrefix + v.Name, nil
 	case *ast.BinaryExpr:
+		switch v.Op {
+		case token.EQL, token.LSS, token.GTR, token.NOT, token.NEQ, token.LEQ, token.GEQ:
+			return "bool", nil
+		}
 		left, err := w.constValueType(v.X)
 		if err != nil {
 			return "", err
@@ -648,12 +774,7 @@ func (w *Walker) walkConst(vs *ast.ValueSpec) {
 				var err error
 				litType, err = w.constValueType(vs.Values[0])
 				if err != nil {
-					if t, ok := w.hardCodedConstantType(ident.Name); ok {
-						litType = t
-						err = nil
-					} else {
-						log.Fatalf("unknown kind in const %q (%T): %v", ident.Name, vs.Values[0], err)
-					}
+					log.Fatalf("unknown kind in const %q (%T): %v", ident.Name, vs.Values[0], err)
 				}
 			}
 		}
@@ -730,7 +851,7 @@ func (w *Walker) nodeString(node interface{}) string {
 		return ""
 	}
 	var b bytes.Buffer
-	printer.Fprint(&b, w.fset, node)
+	printer.Fprint(&b, fset, node)
 	return b.String()
 }
 
@@ -739,7 +860,7 @@ func (w *Walker) nodeDebug(node interface{}) string {
 		return ""
 	}
 	var b bytes.Buffer
-	ast.Fprint(&b, w.fset, node, nil)
+	ast.Fprint(&b, fset, node, nil)
 	return b.String()
 }
 
@@ -806,15 +927,18 @@ type method struct {
 	sig  string // "([]byte) (int, error)", from funcSigString
 }
 
-// interfaceMethods returns the expanded list of methods for an interface.
+// interfaceMethods returns the expanded list of exported methods for an interface.
+// The boolean complete reports whether the list contains all methods (that is, the
+// interface has no unexported methods).
 // pkg is the complete package name ("net/http")
 // iname is the interface name.
-func (w *Walker) interfaceMethods(pkg, iname string) (methods []method) {
+func (w *Walker) interfaceMethods(pkg, iname string) (methods []method, complete bool) {
 	t, ok := w.interfaces[pkgSymbol{pkg, iname}]
 	if !ok {
 		log.Fatalf("failed to find interface %s.%s", pkg, iname)
 	}
 
+	complete = true
 	for _, f := range t.Methods.List {
 		typ := f.Type
 		switch tv := typ.(type) {
@@ -826,6 +950,8 @@ func (w *Walker) interfaceMethods(pkg, iname string) (methods []method) {
 						name: mname.Name,
 						sig:  w.funcSigString(ft),
 					})
+				} else {
+					complete = false
 				}
 			}
 		case *ast.Ident:
@@ -841,7 +967,9 @@ func (w *Walker) interfaceMethods(pkg, iname string) (methods []method) {
 				log.Fatalf("unexported embedded interface %q in exported interface %s.%s; confused",
 					embedded, pkg, iname)
 			}
-			methods = append(methods, w.interfaceMethods(pkg, embedded)...)
+			m, c := w.interfaceMethods(pkg, embedded)
+			methods = append(methods, m...)
+			complete = complete && c
 		case *ast.SelectorExpr:
 			lhs := w.nodeString(tv.X)
 			rhs := w.nodeString(tv.Sel)
@@ -849,7 +977,9 @@ func (w *Walker) interfaceMethods(pkg, iname string) (methods []method) {
 			if !ok {
 				log.Fatalf("can't resolve selector %q in interface %s.%s", lhs, pkg, iname)
 			}
-			methods = append(methods, w.interfaceMethods(fpkg, rhs)...)
+			m, c := w.interfaceMethods(fpkg, rhs)
+			methods = append(methods, m...)
+			complete = complete && c
 		default:
 			log.Fatalf("unknown type %T in interface field", typ)
 		}
@@ -859,13 +989,27 @@ func (w *Walker) interfaceMethods(pkg, iname string) (methods []method) {
 
 func (w *Walker) walkInterfaceType(name string, t *ast.InterfaceType) {
 	methNames := []string{}
-
 	pop := w.pushScope("type " + name + " interface")
-	for _, m := range w.interfaceMethods(w.curPackageName, name) {
+	methods, complete := w.interfaceMethods(w.curPackageName, name)
+	for _, m := range methods {
 		methNames = append(methNames, m.name)
 		w.emitFeature(fmt.Sprintf("%s%s", m.name, m.sig))
 	}
+	if !complete {
+		// The method set has unexported methods, so all the
+		// implementations are provided by the same package,
+		// so the method set can be extended. Instead of recording
+		// the full set of names (below), record only that there were
+		// unexported methods. (If the interface shrinks, we will notice
+		// because a method signature emitted during the last loop,
+		// will disappear.)
+		w.emitFeature("unexported methods")
+	}
 	pop()
+
+	if !complete {
+		return
+	}
 
 	sort.Strings(methNames)
 	if len(methNames) == 0 {
@@ -908,18 +1052,38 @@ func (w *Walker) walkFuncDecl(f *ast.FuncDecl) {
 
 func (w *Walker) funcSigString(ft *ast.FuncType) string {
 	var b bytes.Buffer
+	writeField := func(b *bytes.Buffer, f *ast.Field) {
+		if n := len(f.Names); n > 1 {
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(w.nodeString(w.namelessType(f.Type)))
+			}
+		} else {
+			b.WriteString(w.nodeString(w.namelessType(f.Type)))
+		}
+	}
 	b.WriteByte('(')
 	if ft.Params != nil {
 		for i, f := range ft.Params.List {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(w.nodeString(w.namelessType(f.Type)))
+			writeField(&b, f)
 		}
 	}
 	b.WriteByte(')')
 	if ft.Results != nil {
-		if nr := len(ft.Results.List); nr > 0 {
+		nr := 0
+		for _, f := range ft.Results.List {
+			if n := len(f.Names); n > 1 {
+				nr += n
+			} else {
+				nr++
+			}
+		}
+		if nr > 0 {
 			b.WriteByte(' ')
 			if nr > 1 {
 				b.WriteByte('(')
@@ -928,7 +1092,7 @@ func (w *Walker) funcSigString(ft *ast.FuncType) string {
 				if i > 0 {
 					b.WriteString(", ")
 				}
-				b.WriteString(w.nodeString(w.namelessType(f.Type)))
+				writeField(&b, f)
 			}
 			if nr > 1 {
 				b.WriteByte(')')

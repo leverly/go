@@ -94,6 +94,9 @@ directory containing the package sources, has its own flags:
 	    Run benchmarks matching the regular expression.
 	    By default, no benchmarks run.
 
+	-test.benchmem
+	    Print memory allocation statistics for benchmarks.
+
 	-test.cpuprofile cpu.out
 	    Write a CPU profile to the specified file before exiting.
 
@@ -109,6 +112,18 @@ directory containing the package sources, has its own flags:
 	    garbage collector, provided the test can run in the available
 	    memory without garbage collection.
 
+	-test.blockprofile block.out
+	    Write a goroutine blocking profile to the specified file
+	    when all tests are complete.
+
+	-test.blockprofilerate n
+	    Control the detail provided in goroutine blocking profiles by setting
+	    runtime.BlockProfileRate to n.  See 'godoc runtime BlockProfileRate'.
+	    The profiler aims to sample, on average, one blocking event every
+	    n nanoseconds the program spends blocked.  By default,
+	    if -test.blockprofile is set without this flag, all blocking events
+	    are recorded, equivalent to -test.blockprofilerate=1.
+
 	-test.parallel n
 	    Allow parallel execution of test functions that call t.Parallel.
 	    The value of this flag is the maximum number of tests to run
@@ -123,8 +138,8 @@ directory containing the package sources, has its own flags:
 	-test.timeout t
 		If a test runs longer than t, panic.
 
-	-test.benchtime n
-		Run enough iterations of each benchmark to take n seconds.
+	-test.benchtime t
+		Run enough iterations of each benchmark to take t.
 		The default is 1 second.
 
 	-test.cpu 1,2,4
@@ -160,8 +175,8 @@ A benchmark function is one named BenchmarkXXX and should have the signature,
 
 	func BenchmarkXXX(b *testing.B) { ... }
 
-An example function is similar to a test function but, instead of using *testing.T
-to report success or failure, prints output to os.Stdout and os.Stderr.
+An example function is similar to a test function but, instead of using
+*testing.T to report success or failure, prints output to os.Stdout.
 That output is compared against the function's "Output:" comment, which
 must be the last comment in the function body (see example below). An
 example with no such comment, or with no text after "Output:" is compiled
@@ -207,6 +222,7 @@ func runTest(cmd *Command, args []string) {
 	var pkgArgs []string
 	pkgArgs, testArgs = testFlags(args)
 
+	raceInit()
 	pkgs := packagesForBuild(pkgArgs)
 	if len(pkgs) == 0 {
 		fatalf("no packages to test")
@@ -276,7 +292,9 @@ func runTest(cmd *Command, args []string) {
 
 		all := []string{}
 		for path := range deps {
-			all = append(all, path)
+			if !build.IsLocalImport(path) {
+				all = append(all, path)
+			}
 		}
 		sort.Strings(all)
 
@@ -361,7 +379,11 @@ func runTest(cmd *Command, args []string) {
 		if args != "" {
 			args = " " + args
 		}
-		fmt.Fprintf(os.Stderr, "installing these packages with 'go test -i%s' will speed future tests.\n\n", args)
+		extraOpts := ""
+		if buildRace {
+			extraOpts = "-race "
+		}
+		fmt.Fprintf(os.Stderr, "installing these packages with 'go test %s-i%s' will speed future tests.\n\n", extraOpts, args)
 	}
 
 	b.do(root)
@@ -595,14 +617,34 @@ func (b *builder) runTest(a *action) error {
 		cmd.Stderr = &buf
 	}
 
+	// If there are any local SWIG dependencies, we want to load
+	// the shared library from the build directory.
+	if a.p.usesSwig() {
+		env := os.Environ()
+		found := false
+		prefix := "LD_LIBRARY_PATH="
+		for i, v := range env {
+			if strings.HasPrefix(v, prefix) {
+				env[i] = v + ":."
+				found = true
+				break
+			}
+		}
+		if !found {
+			env = append(env, "LD_LIBRARY_PATH=.")
+		}
+		cmd.Env = env
+	}
+
 	t0 := time.Now()
 	err := cmd.Start()
 
 	// This is a last-ditch deadline to detect and
 	// stop wedged test binaries, to keep the builders
 	// running.
-	tick := time.NewTimer(testKillTimeout)
 	if err == nil {
+		tick := time.NewTimer(testKillTimeout)
+		startSigHandlers()
 		done := make(chan error)
 		go func() {
 			done <- cmd.Wait()
@@ -618,8 +660,7 @@ func (b *builder) runTest(a *action) error {
 		tick.Stop()
 	}
 	out := buf.Bytes()
-	t1 := time.Now()
-	t := fmt.Sprintf("%.3fs", t1.Sub(t0).Seconds())
+	t := fmt.Sprintf("%.3fs", time.Since(t0).Seconds())
 	if err == nil {
 		if testShowPass {
 			a.testOutput.Write(out)
@@ -751,7 +792,7 @@ func (t *testFuncs) load(filename, pkg string, seen *bool) error {
 		}
 	}
 	for _, e := range doc.Examples(f) {
-		if e.Output == "" {
+		if e.Output == "" && !e.EmptyOutput {
 			// Don't run examples with no output.
 			continue
 		}

@@ -8,10 +8,11 @@
 #include "malloc.h"
 #include "os_GOOS.h"
 #include "stack.h"
+#include "race.h"
+#include "type.h"
 
 bool	runtime·iscgo;
 
-static void unwindstack(G*, byte*);
 static void schedule(G*);
 
 typedef struct Sched Sched;
@@ -54,7 +55,7 @@ struct Sched {
 	Lock;
 
 	G *gfree;	// available g's (status == Gdead)
-	int32 goidgen;
+	int64 goidgen;
 
 	G *ghead;	// g's waiting to run
 	G *gtail;
@@ -211,6 +212,9 @@ runtime·schedinit(void)
 
 	mstats.enablegc = 1;
 	m->nomemprof--;
+
+	if(raceenabled)
+		runtime·raceinit();
 }
 
 extern void main·init(void);
@@ -242,6 +246,8 @@ runtime·main(void)
 	runtime·gosched();
 
 	main·main();
+	if(raceenabled)
+		runtime·racefini();
 	runtime·exit(0);
 	for(;;)
 		*(int32*)runtime·main = 0;
@@ -258,13 +264,13 @@ schedlock(void)
 static void
 schedunlock(void)
 {
-	M *m;
+	M *mp;
 
-	m = mwakeup;
+	mp = mwakeup;
 	mwakeup = nil;
 	runtime·unlock(&runtime·sched);
-	if(m != nil)
-		runtime·notewakeup(&m->havenextg);
+	if(mp != nil)
+		runtime·notewakeup(&mp->havenextg);
 }
 
 void
@@ -275,11 +281,11 @@ runtime·goexit(void)
 }
 
 void
-runtime·goroutineheader(G *g)
+runtime·goroutineheader(G *gp)
 {
 	int8 *status;
 
-	switch(g->status) {
+	switch(gp->status) {
 	case Gidle:
 		status = "idle";
 		break;
@@ -293,8 +299,8 @@ runtime·goroutineheader(G *g)
 		status = "syscall";
 		break;
 	case Gwaiting:
-		if(g->waitreason)
-			status = g->waitreason;
+		if(gp->waitreason)
+			status = gp->waitreason;
 		else
 			status = "waiting";
 		break;
@@ -305,20 +311,20 @@ runtime·goroutineheader(G *g)
 		status = "???";
 		break;
 	}
-	runtime·printf("goroutine %d [%s]:\n", g->goid, status);
+	runtime·printf("goroutine %D [%s]:\n", gp->goid, status);
 }
 
 void
 runtime·tracebackothers(G *me)
 {
-	G *g;
+	G *gp;
 
-	for(g = runtime·allg; g != nil; g = g->alllink) {
-		if(g == me || g->status == Gdead)
+	for(gp = runtime·allg; gp != nil; gp = gp->alllink) {
+		if(gp == me || gp->status == Gdead)
 			continue;
 		runtime·printf("\n");
-		runtime·goroutineheader(g);
-		runtime·traceback(g->sched.pc, g->sched.sp, 0, g);
+		runtime·goroutineheader(gp);
+		runtime·traceback(gp->sched.pc, (byte*)gp->sched.sp, 0, gp);
 	}
 }
 
@@ -335,24 +341,22 @@ runtime·idlegoroutine(void)
 }
 
 static void
-mcommoninit(M *m)
+mcommoninit(M *mp)
 {
-	m->id = runtime·sched.mcount++;
-	m->fastrand = 0x49f6428aUL + m->id + runtime·cputicks();
-	m->stackalloc = runtime·malloc(sizeof(*m->stackalloc));
-	runtime·FixAlloc_Init(m->stackalloc, FixedStack, runtime·SysAlloc, nil, nil);
+	mp->id = runtime·sched.mcount++;
+	mp->fastrand = 0x49f6428aUL + mp->id + runtime·cputicks();
 
-	if(m->mcache == nil)
-		m->mcache = runtime·allocmcache();
+	if(mp->mcache == nil)
+		mp->mcache = runtime·allocmcache();
 
-	runtime·callers(1, m->createstack, nelem(m->createstack));
+	runtime·callers(1, mp->createstack, nelem(mp->createstack));
 
 	// Add to runtime·allm so garbage collector doesn't free m
 	// when it is just in a register or thread-local storage.
-	m->alllink = runtime·allm;
+	mp->alllink = runtime·allm;
 	// runtime·NumCgoCall() iterates over allm w/o schedlock,
 	// so we need to publish it safely.
-	runtime·atomicstorep(&runtime·allm, m);
+	runtime·atomicstorep(&runtime·allm, mp);
 }
 
 // Try to increment mcpu.  Report whether succeeded.
@@ -372,34 +376,34 @@ canaddmcpu(void)
 
 // Put on `g' queue.  Sched must be locked.
 static void
-gput(G *g)
+gput(G *gp)
 {
-	M *m;
+	M *mp;
 
 	// If g is wired, hand it off directly.
-	if((m = g->lockedm) != nil && canaddmcpu()) {
-		mnextg(m, g);
+	if((mp = gp->lockedm) != nil && canaddmcpu()) {
+		mnextg(mp, gp);
 		return;
 	}
 
 	// If g is the idle goroutine for an m, hand it off.
-	if(g->idlem != nil) {
-		if(g->idlem->idleg != nil) {
-			runtime·printf("m%d idle out of sync: g%d g%d\n",
-				g->idlem->id,
-				g->idlem->idleg->goid, g->goid);
+	if(gp->idlem != nil) {
+		if(gp->idlem->idleg != nil) {
+			runtime·printf("m%d idle out of sync: g%D g%D\n",
+				gp->idlem->id,
+				gp->idlem->idleg->goid, gp->goid);
 			runtime·throw("runtime: double idle");
 		}
-		g->idlem->idleg = g;
+		gp->idlem->idleg = gp;
 		return;
 	}
 
-	g->schedlink = nil;
+	gp->schedlink = nil;
 	if(runtime·sched.ghead == nil)
-		runtime·sched.ghead = g;
+		runtime·sched.ghead = gp;
 	else
-		runtime·sched.gtail->schedlink = g;
-	runtime·sched.gtail = g;
+		runtime·sched.gtail->schedlink = gp;
+	runtime·sched.gtail = gp;
 
 	// increment gwait.
 	// if it transitions to nonzero, set atomic gwaiting bit.
@@ -418,11 +422,11 @@ haveg(void)
 static G*
 gget(void)
 {
-	G *g;
+	G *gp;
 
-	g = runtime·sched.ghead;
-	if(g){
-		runtime·sched.ghead = g->schedlink;
+	gp = runtime·sched.ghead;
+	if(gp) {
+		runtime·sched.ghead = gp->schedlink;
 		if(runtime·sched.ghead == nil)
 			runtime·sched.gtail = nil;
 		// decrement gwait.
@@ -430,45 +434,45 @@ gget(void)
 		if(--runtime·sched.gwait == 0)
 			runtime·xadd(&runtime·sched.atomic, -1<<gwaitingShift);
 	} else if(m->idleg != nil) {
-		g = m->idleg;
+		gp = m->idleg;
 		m->idleg = nil;
 	}
-	return g;
+	return gp;
 }
 
 // Put on `m' list.  Sched must be locked.
 static void
-mput(M *m)
+mput(M *mp)
 {
-	m->schedlink = runtime·sched.mhead;
-	runtime·sched.mhead = m;
+	mp->schedlink = runtime·sched.mhead;
+	runtime·sched.mhead = mp;
 	runtime·sched.mwait++;
 }
 
 // Get an `m' to run `g'.  Sched must be locked.
 static M*
-mget(G *g)
+mget(G *gp)
 {
-	M *m;
+	M *mp;
 
 	// if g has its own m, use it.
-	if(g && (m = g->lockedm) != nil)
-		return m;
+	if(gp && (mp = gp->lockedm) != nil)
+		return mp;
 
 	// otherwise use general m pool.
-	if((m = runtime·sched.mhead) != nil){
-		runtime·sched.mhead = m->schedlink;
+	if((mp = runtime·sched.mhead) != nil) {
+		runtime·sched.mhead = mp->schedlink;
 		runtime·sched.mwait--;
 	}
-	return m;
+	return mp;
 }
 
 // Mark g ready to run.
 void
-runtime·ready(G *g)
+runtime·ready(G *gp)
 {
 	schedlock();
-	readylocked(g);
+	readylocked(gp);
 	schedunlock();
 }
 
@@ -476,23 +480,23 @@ runtime·ready(G *g)
 // G might be running already and about to stop.
 // The sched lock protects g->status from changing underfoot.
 static void
-readylocked(G *g)
+readylocked(G *gp)
 {
-	if(g->m){
+	if(gp->m) {
 		// Running on another machine.
 		// Ready it when it stops.
-		g->readyonstop = 1;
+		gp->readyonstop = 1;
 		return;
 	}
 
 	// Mark runnable.
-	if(g->status == Grunnable || g->status == Grunning) {
-		runtime·printf("goroutine %d has status %d\n", g->goid, g->status);
+	if(gp->status == Grunnable || gp->status == Grunning) {
+		runtime·printf("goroutine %D has status %d\n", gp->goid, gp->status);
 		runtime·throw("bad g->status in ready");
 	}
-	g->status = Grunnable;
+	gp->status = Grunnable;
 
-	gput(g);
+	gput(gp);
 	matchmg();
 }
 
@@ -505,24 +509,24 @@ nop(void)
 // debuggers can set a breakpoint here and catch all
 // new goroutines.
 static void
-newprocreadylocked(G *g)
+newprocreadylocked(G *gp)
 {
 	nop();	// avoid inlining in 6l
-	readylocked(g);
+	readylocked(gp);
 }
 
 // Pass g to m for running.
 // Caller has already incremented mcpu.
 static void
-mnextg(M *m, G *g)
+mnextg(M *mp, G *gp)
 {
 	runtime·sched.grunning++;
-	m->nextg = g;
-	if(m->waitnextg) {
-		m->waitnextg = 0;
+	mp->nextg = gp;
+	if(mp->waitnextg) {
+		mp->waitnextg = 0;
 		if(mwakeup != nil)
 			runtime·notewakeup(&mwakeup->havenextg);
-		mwakeup = m;
+		mwakeup = mp;
 	}
 }
 
@@ -646,35 +650,38 @@ top:
 }
 
 int32
-runtime·helpgc(bool *extra)
+runtime·gcprocs(void)
+{
+	int32 n;
+	
+	// Figure out how many CPUs to use during GC.
+	// Limited by gomaxprocs, number of actual CPUs, and MaxGcproc.
+	n = runtime·gomaxprocs;
+	if(n > runtime·ncpu)
+		n = runtime·ncpu;
+	if(n > MaxGcproc)
+		n = MaxGcproc;
+	if(n > runtime·sched.mwait+1) // one M is currently running
+		n = runtime·sched.mwait+1;
+	return n;
+}
+
+void
+runtime·helpgc(int32 nproc)
 {
 	M *mp;
-	int32 n, max;
-
-	// Figure out how many CPUs to use.
-	// Limited by gomaxprocs, number of actual CPUs, and MaxGcproc.
-	max = runtime·gomaxprocs;
-	if(max > runtime·ncpu)
-		max = runtime·ncpu;
-	if(max > MaxGcproc)
-		max = MaxGcproc;
-
-	// We're going to use one CPU no matter what.
-	// Figure out the max number of additional CPUs.
-	max--;
+	int32 n;
 
 	runtime·lock(&runtime·sched);
-	n = 0;
-	while(n < max && (mp = mget(nil)) != nil) {
-		n++;
+	for(n = 1; n < nproc; n++) { // one M is currently running
+		mp = mget(nil);
+		if(mp == nil)
+			runtime·throw("runtime·gcprocs inconsistency");
 		mp->helpgc = 1;
 		mp->waitnextg = 0;
 		runtime·notewakeup(&mp->havenextg);
 	}
 	runtime·unlock(&runtime·sched);
-	if(extra)
-		*extra = n != max;
-	return n;
 }
 
 void
@@ -714,26 +721,38 @@ runtime·stoptheworld(void)
 }
 
 void
-runtime·starttheworld(bool extra)
+runtime·starttheworld(void)
 {
-	M *m;
+	M *mp;
+	int32 max;
+	
+	// Figure out how many CPUs GC could possibly use.
+	max = runtime·gomaxprocs;
+	if(max > runtime·ncpu)
+		max = runtime·ncpu;
+	if(max > MaxGcproc)
+		max = MaxGcproc;
 
 	schedlock();
 	runtime·gcwaiting = 0;
 	setmcpumax(runtime·gomaxprocs);
 	matchmg();
-	if(extra && canaddmcpu()) {
-		// Start a new m that will (we hope) be idle
-		// and so available to help when the next
-		// garbage collection happens.
+	if(runtime·gcprocs() < max && canaddmcpu()) {
+		// If GC could have used another helper proc, start one now,
+		// in the hope that it will be available next time.
+		// It would have been even better to start it before the collection,
+		// but doing so requires allocating memory, so it's tricky to
+		// coordinate.  This lazy approach works out in practice:
+		// we don't mind if the first couple gc rounds don't have quite
+		// the maximum number of procs.
 		// canaddmcpu above did mcpu++
 		// (necessary, because m will be doing various
 		// initialization work so is definitely running),
 		// but m is not running a specific goroutine,
 		// so set the helpgc flag as a signal to m's
 		// first schedule(nil) to mcpu-- and grunning--.
-		m = runtime·newm();
-		m->helpgc = 1;
+		mp = runtime·newm();
+		mp->helpgc = 1;
 		runtime·sched.grunning++;
 	}
 	schedunlock();
@@ -743,6 +762,11 @@ runtime·starttheworld(bool extra)
 void
 runtime·mstart(void)
 {
+	// It is used by windows-386 only. Unfortunately, seh needs
+	// to be located on os stack, and mstart runs on os stack
+	// for both m0 and m.
+	SEH seh;
+
 	if(g != m->g0)
 		runtime·throw("bad runtime·mstart");
 
@@ -751,6 +775,7 @@ runtime·mstart(void)
 	// so other calls can reuse this stack space.
 	runtime·gosave(&m->g0->sched);
 	m->g0->sched.pc = (void*)-1;  // make sure it is never used
+	m->seh = &seh;
 	runtime·asminit();
 	runtime·minit();
 
@@ -760,6 +785,10 @@ runtime·mstart(void)
 		runtime·initsig();
 
 	schedule(nil);
+
+	// TODO(brainman): This point is never reached, because scheduler
+	// does not release os threads at the moment. But once this path
+	// is enabled, we must remove our seh here.
 }
 
 // When running with cgo, we call libcgo_thread_start
@@ -802,10 +831,17 @@ matchmg(void)
 M*
 runtime·newm(void)
 {
-	M *m;
+	M *mp;
+	static Type *mtype;  // The Go type M
 
-	m = runtime·malloc(sizeof(M));
-	mcommoninit(m);
+	if(mtype == nil) {
+		Eface e;
+		runtime·gc_m_ptr(&e);
+		mtype = ((PtrType*)e.type)->elem;
+	}
+
+	mp = runtime·cnew(mtype);
+	mcommoninit(mp);
 
 	if(runtime·iscgo) {
 		CgoThreadStart ts;
@@ -813,21 +849,21 @@ runtime·newm(void)
 		if(libcgo_thread_start == nil)
 			runtime·throw("libcgo_thread_start missing");
 		// pthread_create will make us a stack.
-		m->g0 = runtime·malg(-1);
-		ts.m = m;
-		ts.g = m->g0;
+		mp->g0 = runtime·malg(-1);
+		ts.m = mp;
+		ts.g = mp->g0;
 		ts.fn = runtime·mstart;
 		runtime·asmcgocall(libcgo_thread_start, &ts);
 	} else {
 		if(Windows)
 			// windows will layout sched stack on os stack
-			m->g0 = runtime·malg(-1);
+			mp->g0 = runtime·malg(-1);
 		else
-			m->g0 = runtime·malg(8192);
-		runtime·newosproc(m, m->g0, m->g0->stackbase, runtime·mstart);
+			mp->g0 = runtime·malg(8192);
+		runtime·newosproc(mp, mp->g0, (byte*)mp->g0->stackbase, runtime·mstart);
 	}
 
-	return m;
+	return mp;
 }
 
 // One round of scheduler: find a goroutine and run it.
@@ -851,7 +887,7 @@ schedule(G *gp)
 		if(atomic_mcpu(v) > maxgomaxprocs)
 			runtime·throw("negative mcpu in scheduler");
 
-		switch(gp->status){
+		switch(gp->status) {
 		case Grunnable:
 		case Gdead:
 			// Shouldn't have been running!
@@ -861,19 +897,21 @@ schedule(G *gp)
 			gput(gp);
 			break;
 		case Gmoribund:
+			if(raceenabled)
+				runtime·racegoend(gp->goid);
 			gp->status = Gdead;
 			if(gp->lockedm) {
 				gp->lockedm = nil;
 				m->lockedg = nil;
 			}
 			gp->idlem = nil;
-			unwindstack(gp, nil);
+			runtime·unwindstack(gp, nil);
 			gfput(gp);
 			if(--runtime·sched.gcount == 0)
 				runtime·exit(0);
 			break;
 		}
-		if(gp->readyonstop){
+		if(gp->readyonstop) {
 			gp->readyonstop = 0;
 			readylocked(gp);
 		}
@@ -925,6 +963,18 @@ runtime·gosched(void)
 	if(g == m->g0)
 		runtime·throw("gosched of g0");
 	runtime·mcall(schedule);
+}
+
+// Puts the current goroutine into a waiting state and unlocks the lock.
+// The goroutine can be made runnable again by calling runtime·ready(gp).
+void
+runtime·park(void (*unlockf)(Lock*), Lock *lock, int8 *reason)
+{
+	g->status = Gwaiting;
+	g->waitreason = reason;
+	if(unlockf)
+		unlockf(lock);
+	runtime·gosched();
 }
 
 // The goroutine g is about to enter a system call.
@@ -1009,7 +1059,7 @@ runtime·exitsyscall(void)
 		g->status = Grunning;
 		// Garbage collector isn't running (since we are),
 		// so okay to clear gcstack.
-		g->gcstack = nil;
+		g->gcstack = (uintptr)nil;
 
 		if(m->profilehz > 0)
 			runtime·setprof(true);
@@ -1034,7 +1084,7 @@ runtime·exitsyscall(void)
 	// Must wait until now because until gosched returns
 	// we don't know for sure that the garbage collector
 	// is not running.
-	g->gcstack = nil;
+	g->gcstack = (uintptr)nil;
 }
 
 // Called from runtime·lessstack when returning from a function which
@@ -1043,35 +1093,42 @@ runtime·exitsyscall(void)
 void
 runtime·oldstack(void)
 {
-	Stktop *top, old;
+	Stktop *top;
+	Gobuf label;
 	uint32 argsize;
 	uintptr cret;
-	byte *sp;
-	G *g1;
-	int32 goid;
+	byte *sp, *old;
+	uintptr *src, *dst, *dstend;
+	G *gp;
+	int64 goid;
 
 //printf("oldstack m->cret=%p\n", m->cret);
 
-	g1 = m->curg;
-	top = (Stktop*)g1->stackbase;
+	gp = m->curg;
+	top = (Stktop*)gp->stackbase;
+	old = (byte*)gp->stackguard - StackGuard;
 	sp = (byte*)top;
-	old = *top;
-	argsize = old.argsize;
+	argsize = top->argsize;
 	if(argsize > 0) {
 		sp -= argsize;
-		runtime·memmove(top->argp, sp, argsize);
+		dst = (uintptr*)top->argp;
+		dstend = dst + argsize/sizeof(*dst);
+		src = (uintptr*)sp;
+		while(dst < dstend)
+			*dst++ = *src++;
 	}
-	goid = old.gobuf.g->goid;	// fault if g is bad, before gogo
+	goid = top->gobuf.g->goid;	// fault if g is bad, before gogo
 	USED(goid);
 
-	if(old.free != 0)
-		runtime·stackfree(g1->stackguard - StackGuard, old.free);
-	g1->stackbase = old.stackbase;
-	g1->stackguard = old.stackguard;
+	label = top->gobuf;
+	gp->stackbase = (uintptr)top->stackbase;
+	gp->stackguard = (uintptr)top->stackguard;
+	if(top->free != 0)
+		runtime·stackfree(old, top->free);
 
 	cret = m->cret;
 	m->cret = 0;  // drop reference
-	runtime·gogo(&old.gobuf, cret);
+	runtime·gogo(&label, cret);
 }
 
 // Called from reflect·call or from runtime·morestack when a new
@@ -1082,20 +1139,21 @@ runtime·oldstack(void)
 void
 runtime·newstack(void)
 {
-	int32 framesize, argsize;
+	int32 framesize, minalloc, argsize;
 	Stktop *top;
 	byte *stk, *sp;
-	G *g1;
+	uintptr *src, *dst, *dstend;
+	G *gp;
 	Gobuf label;
 	bool reflectcall;
 	uintptr free;
 
 	framesize = m->moreframesize;
 	argsize = m->moreargsize;
-	g1 = m->curg;
+	gp = m->curg;
 
-	if(m->morebuf.sp < g1->stackguard - StackGuard) {
-		runtime·printf("runtime: split stack overflow: %p < %p\n", m->morebuf.sp, g1->stackguard - StackGuard);
+	if(m->morebuf.sp < gp->stackguard - StackGuard) {
+		runtime·printf("runtime: split stack overflow: %p < %p\n", m->morebuf.sp, gp->stackguard - StackGuard);
 		runtime·throw("runtime: split stack overflow");
 	}
 	if(argsize % sizeof(uintptr) != 0) {
@@ -1103,18 +1161,26 @@ runtime·newstack(void)
 		runtime·throw("runtime: stack split argsize");
 	}
 
+	minalloc = 0;
 	reflectcall = framesize==1;
-	if(reflectcall)
+	if(reflectcall) {
 		framesize = 0;
+		// moreframesize_minalloc is only set in runtime·gc(),
+		// that calls newstack via reflect·call().
+		minalloc = m->moreframesize_minalloc;
+		m->moreframesize_minalloc = 0;
+		if(framesize < minalloc)
+			framesize = minalloc;
+	}
 
-	if(reflectcall && m->morebuf.sp - sizeof(Stktop) - argsize - 32 > g1->stackguard) {
+	if(reflectcall && minalloc == 0 && m->morebuf.sp - sizeof(Stktop) - argsize - 32 > gp->stackguard) {
 		// special case: called from reflect.call (framesize==1)
 		// to call code with an arbitrary argument size,
 		// and we have enough space on the current stack.
 		// the new Stktop* is necessary to unwind, but
 		// we don't need to create a new segment.
 		top = (Stktop*)(m->morebuf.sp - sizeof(*top));
-		stk = g1->stackguard - StackGuard;
+		stk = (byte*)gp->stackguard - StackGuard;
 		free = 0;
 	} else {
 		// allocate new segment.
@@ -1128,30 +1194,36 @@ runtime·newstack(void)
 		free = framesize;
 	}
 
-//runtime·printf("newstack framesize=%d argsize=%d morepc=%p moreargp=%p gobuf=%p, %p top=%p old=%p\n",
-//framesize, argsize, m->morepc, m->moreargp, m->morebuf.pc, m->morebuf.sp, top, g1->stackbase);
+	if(0) {
+		runtime·printf("newstack framesize=%d argsize=%d morepc=%p moreargp=%p gobuf=%p, %p top=%p old=%p\n",
+			framesize, argsize, m->morepc, m->moreargp, m->morebuf.pc, m->morebuf.sp, top, gp->stackbase);
+	}
 
-	top->stackbase = g1->stackbase;
-	top->stackguard = g1->stackguard;
+	top->stackbase = (byte*)gp->stackbase;
+	top->stackguard = (byte*)gp->stackguard;
 	top->gobuf = m->morebuf;
 	top->argp = m->moreargp;
 	top->argsize = argsize;
 	top->free = free;
 	m->moreargp = nil;
 	m->morebuf.pc = nil;
-	m->morebuf.sp = nil;
+	m->morebuf.sp = (uintptr)nil;
 
 	// copy flag from panic
-	top->panic = g1->ispanic;
-	g1->ispanic = false;
+	top->panic = gp->ispanic;
+	gp->ispanic = false;
 
-	g1->stackbase = (byte*)top;
-	g1->stackguard = stk + StackGuard;
+	gp->stackbase = (uintptr)top;
+	gp->stackguard = (uintptr)stk + StackGuard;
 
 	sp = (byte*)top;
 	if(argsize > 0) {
 		sp -= argsize;
-		runtime·memmove(sp, top->argp, argsize);
+		dst = (uintptr*)sp;
+		dstend = dst + argsize/sizeof(*dst);
+		src = (uintptr*)top->argp;
+		while(dst < dstend)
+			*dst++ = *src++;
 	}
 	if(thechar == '5') {
 		// caller would have saved its LR below args.
@@ -1161,7 +1233,7 @@ runtime·newstack(void)
 
 	// Continue as if lessstack had just called m->morepc
 	// (the PC that decided to grow the stack).
-	label.sp = sp;
+	label.sp = (uintptr)sp;
 	label.pc = (byte*)runtime·lessstack;
 	label.g = m->curg;
 	runtime·gogocall(&label, m->morepc);
@@ -1204,10 +1276,10 @@ runtime·malg(int32 stacksize)
 			stk = g->param;
 			g->param = nil;
 		}
-		newg->stack0 = stk;
-		newg->stackguard = stk + StackGuard;
-		newg->stackbase = stk + StackSystem + stacksize - sizeof(Stktop);
-		runtime·memclr(newg->stackbase, sizeof(Stktop));
+		newg->stack0 = (uintptr)stk;
+		newg->stackguard = (uintptr)stk + StackGuard;
+		newg->stackbase = (uintptr)stk + StackSystem + stacksize - sizeof(Stktop);
+		runtime·memclr((byte*)newg->stackbase, sizeof(Stktop));
 	}
 	return newg;
 }
@@ -1242,6 +1314,7 @@ runtime·newproc1(byte *fn, byte *argp, int32 narg, int32 nret, void *callerpc)
 	byte *sp;
 	G *newg;
 	int32 siz;
+	int64 goid;
 
 //printf("newproc1 %p %p narg=%d nret=%d\n", fn, argp, narg, nret);
 	siz = narg + nret;
@@ -1254,9 +1327,13 @@ runtime·newproc1(byte *fn, byte *argp, int32 narg, int32 nret, void *callerpc)
 	if(siz > StackMin - 1024)
 		runtime·throw("runtime.newproc: function arguments too large for new goroutine");
 
+	goid = runtime·xadd64((uint64*)&runtime·sched.goidgen, 1);
+	if(raceenabled)
+		runtime·racegostart(goid, callerpc);
+
 	schedlock();
 
-	if((newg = gfget()) != nil){
+	if((newg = gfget()) != nil) {
 		if(newg->stackguard - StackGuard != newg->stack0)
 			runtime·throw("invalid stack in newg");
 	} else {
@@ -1270,7 +1347,7 @@ runtime·newproc1(byte *fn, byte *argp, int32 narg, int32 nret, void *callerpc)
 	newg->status = Gwaiting;
 	newg->waitreason = "new goroutine";
 
-	sp = newg->stackbase;
+	sp = (byte*)newg->stackbase;
 	sp -= siz;
 	runtime·memmove(sp, argp, narg);
 	if(thechar == '5') {
@@ -1279,15 +1356,14 @@ runtime·newproc1(byte *fn, byte *argp, int32 narg, int32 nret, void *callerpc)
 		*(void**)sp = nil;
 	}
 
-	newg->sched.sp = sp;
+	newg->sched.sp = (uintptr)sp;
 	newg->sched.pc = (byte*)runtime·goexit;
 	newg->sched.g = newg;
 	newg->entry = fn;
 	newg->gopc = (uintptr)callerpc;
 
 	runtime·sched.gcount++;
-	runtime·sched.goidgen++;
-	newg->goid = runtime·sched.goidgen;
+	newg->goid = goid;
 
 	newprocreadylocked(newg);
 	schedunlock();
@@ -1296,314 +1372,32 @@ runtime·newproc1(byte *fn, byte *argp, int32 narg, int32 nret, void *callerpc)
 //printf(" goid=%d\n", newg->goid);
 }
 
-// Create a new deferred function fn with siz bytes of arguments.
-// The compiler turns a defer statement into a call to this.
-// Cannot split the stack because it assumes that the arguments
-// are available sequentially after &fn; they would not be
-// copied if a stack split occurred.  It's OK for this to call
-// functions that split the stack.
-#pragma textflag 7
-uintptr
-runtime·deferproc(int32 siz, byte* fn, ...)
-{
-	Defer *d;
-
-	d = runtime·malloc(sizeof(*d) + siz - sizeof(d->args));
-	d->fn = fn;
-	d->siz = siz;
-	d->pc = runtime·getcallerpc(&siz);
-	if(thechar == '5')
-		d->argp = (byte*)(&fn+2);  // skip caller's saved link register
-	else
-		d->argp = (byte*)(&fn+1);
-	runtime·memmove(d->args, d->argp, d->siz);
-
-	d->link = g->defer;
-	g->defer = d;
-
-	// deferproc returns 0 normally.
-	// a deferred func that stops a panic
-	// makes the deferproc return 1.
-	// the code the compiler generates always
-	// checks the return value and jumps to the
-	// end of the function if deferproc returns != 0.
-	return 0;
-}
-
-// Run a deferred function if there is one.
-// The compiler inserts a call to this at the end of any
-// function which calls defer.
-// If there is a deferred function, this will call runtime·jmpdefer,
-// which will jump to the deferred function such that it appears
-// to have been called by the caller of deferreturn at the point
-// just before deferreturn was called.  The effect is that deferreturn
-// is called again and again until there are no more deferred functions.
-// Cannot split the stack because we reuse the caller's frame to
-// call the deferred function.
-#pragma textflag 7
-void
-runtime·deferreturn(uintptr arg0)
-{
-	Defer *d;
-	byte *argp, *fn;
-
-	d = g->defer;
-	if(d == nil)
-		return;
-	argp = (byte*)&arg0;
-	if(d->argp != argp)
-		return;
-	runtime·memmove(argp, d->args, d->siz);
-	g->defer = d->link;
-	fn = d->fn;
-	if(!d->nofree)
-		runtime·free(d);
-	runtime·jmpdefer(fn, argp);
-}
-
-// Run all deferred functions for the current goroutine.
-static void
-rundefer(void)
-{
-	Defer *d;
-
-	while((d = g->defer) != nil) {
-		g->defer = d->link;
-		reflect·call(d->fn, d->args, d->siz);
-		if(!d->nofree)
-			runtime·free(d);
-	}
-}
-
-// Free stack frames until we hit the last one
-// or until we find the one that contains the argp.
-static void
-unwindstack(G *gp, byte *sp)
-{
-	Stktop *top;
-	byte *stk;
-
-	// Must be called from a different goroutine, usually m->g0.
-	if(g == gp)
-		runtime·throw("unwindstack on self");
-
-	while((top = (Stktop*)gp->stackbase) != nil && top->stackbase != nil) {
-		stk = gp->stackguard - StackGuard;
-		if(stk <= sp && sp < gp->stackbase)
-			break;
-		gp->stackbase = top->stackbase;
-		gp->stackguard = top->stackguard;
-		if(top->free != 0)
-			runtime·stackfree(stk, top->free);
-	}
-
-	if(sp != nil && (sp < gp->stackguard - StackGuard || gp->stackbase < sp)) {
-		runtime·printf("recover: %p not in [%p, %p]\n", sp, gp->stackguard - StackGuard, gp->stackbase);
-		runtime·throw("bad unwindstack");
-	}
-}
-
-// Print all currently active panics.  Used when crashing.
-static void
-printpanics(Panic *p)
-{
-	if(p->link) {
-		printpanics(p->link);
-		runtime·printf("\t");
-	}
-	runtime·printf("panic: ");
-	runtime·printany(p->arg);
-	if(p->recovered)
-		runtime·printf(" [recovered]");
-	runtime·printf("\n");
-}
-
-static void recovery(G*);
-
-// The implementation of the predeclared function panic.
-void
-runtime·panic(Eface e)
-{
-	Defer *d;
-	Panic *p;
-
-	p = runtime·mal(sizeof *p);
-	p->arg = e;
-	p->link = g->panic;
-	p->stackbase = g->stackbase;
-	g->panic = p;
-
-	for(;;) {
-		d = g->defer;
-		if(d == nil)
-			break;
-		// take defer off list in case of recursive panic
-		g->defer = d->link;
-		g->ispanic = true;	// rock for newstack, where reflect.call ends up
-		reflect·call(d->fn, d->args, d->siz);
-		if(p->recovered) {
-			g->panic = p->link;
-			if(g->panic == nil)	// must be done with signal
-				g->sig = 0;
-			runtime·free(p);
-			// put recovering defer back on list
-			// for scheduler to find.
-			d->link = g->defer;
-			g->defer = d;
-			runtime·mcall(recovery);
-			runtime·throw("recovery failed"); // mcall should not return
-		}
-		if(!d->nofree)
-			runtime·free(d);
-	}
-
-	// ran out of deferred calls - old-school panic now
-	runtime·startpanic();
-	printpanics(g->panic);
-	runtime·dopanic(0);
-}
-
-// Unwind the stack after a deferred function calls recover
-// after a panic.  Then arrange to continue running as though
-// the caller of the deferred function returned normally.
-static void
-recovery(G *gp)
-{
-	Defer *d;
-
-	// Rewind gp's stack; we're running on m->g0's stack.
-	d = gp->defer;
-	gp->defer = d->link;
-
-	// Unwind to the stack frame with d's arguments in it.
-	unwindstack(gp, d->argp);
-
-	// Make the deferproc for this d return again,
-	// this time returning 1.  The calling function will
-	// jump to the standard return epilogue.
-	// The -2*sizeof(uintptr) makes up for the
-	// two extra words that are on the stack at
-	// each call to deferproc.
-	// (The pc we're returning to does pop pop
-	// before it tests the return value.)
-	// On the arm there are 2 saved LRs mixed in too.
-	if(thechar == '5')
-		gp->sched.sp = (byte*)d->argp - 4*sizeof(uintptr);
-	else
-		gp->sched.sp = (byte*)d->argp - 2*sizeof(uintptr);
-	gp->sched.pc = d->pc;
-	if(!d->nofree)
-		runtime·free(d);
-	runtime·gogo(&gp->sched, 1);
-}
-
-// The implementation of the predeclared function recover.
-// Cannot split the stack because it needs to reliably
-// find the stack segment of its caller.
-#pragma textflag 7
-void
-runtime·recover(byte *argp, Eface ret)
-{
-	Stktop *top, *oldtop;
-	Panic *p;
-
-	// Must be a panic going on.
-	if((p = g->panic) == nil || p->recovered)
-		goto nomatch;
-
-	// Frame must be at the top of the stack segment,
-	// because each deferred call starts a new stack
-	// segment as a side effect of using reflect.call.
-	// (There has to be some way to remember the
-	// variable argument frame size, and the segment
-	// code already takes care of that for us, so we
-	// reuse it.)
-	//
-	// As usual closures complicate things: the fp that
-	// the closure implementation function claims to have
-	// is where the explicit arguments start, after the
-	// implicit pointer arguments and PC slot.
-	// If we're on the first new segment for a closure,
-	// then fp == top - top->args is correct, but if
-	// the closure has its own big argument frame and
-	// allocated a second segment (see below),
-	// the fp is slightly above top - top->args.
-	// That condition can't happen normally though
-	// (stack pointers go down, not up), so we can accept
-	// any fp between top and top - top->args as
-	// indicating the top of the segment.
-	top = (Stktop*)g->stackbase;
-	if(argp < (byte*)top - top->argsize || (byte*)top < argp)
-		goto nomatch;
-
-	// The deferred call makes a new segment big enough
-	// for the argument frame but not necessarily big
-	// enough for the function's local frame (size unknown
-	// at the time of the call), so the function might have
-	// made its own segment immediately.  If that's the
-	// case, back top up to the older one, the one that
-	// reflect.call would have made for the panic.
-	//
-	// The fp comparison here checks that the argument
-	// frame that was copied during the split (the top->args
-	// bytes above top->fp) abuts the old top of stack.
-	// This is a correct test for both closure and non-closure code.
-	oldtop = (Stktop*)top->stackbase;
-	if(oldtop != nil && top->argp == (byte*)oldtop - top->argsize)
-		top = oldtop;
-
-	// Now we have the segment that was created to
-	// run this call.  It must have been marked as a panic segment.
-	if(!top->panic)
-		goto nomatch;
-
-	// Okay, this is the top frame of a deferred call
-	// in response to a panic.  It can see the panic argument.
-	p->recovered = 1;
-	ret = p->arg;
-	FLUSH(&ret);
-	return;
-
-nomatch:
-	ret.type = nil;
-	ret.data = nil;
-	FLUSH(&ret);
-}
-
-
 // Put on gfree list.  Sched must be locked.
 static void
-gfput(G *g)
+gfput(G *gp)
 {
-	if(g->stackguard - StackGuard != g->stack0)
+	if(gp->stackguard - StackGuard != gp->stack0)
 		runtime·throw("invalid stack in gfput");
-	g->schedlink = runtime·sched.gfree;
-	runtime·sched.gfree = g;
+	gp->schedlink = runtime·sched.gfree;
+	runtime·sched.gfree = gp;
 }
 
 // Get from gfree list.  Sched must be locked.
 static G*
 gfget(void)
 {
-	G *g;
+	G *gp;
 
-	g = runtime·sched.gfree;
-	if(g)
-		runtime·sched.gfree = g->schedlink;
-	return g;
+	gp = runtime·sched.gfree;
+	if(gp)
+		runtime·sched.gfree = gp->schedlink;
+	return gp;
 }
 
 void
 runtime·Breakpoint(void)
 {
 	runtime·breakpoint();
-}
-
-void
-runtime·Goexit(void)
-{
-	rundefer();
-	runtime·goexit();
 }
 
 void
@@ -1697,7 +1491,7 @@ runtime·mid(uint32 ret)
 }
 
 void
-runtime·NumGoroutine(int32 ret)
+runtime·NumGoroutine(intgo ret)
 {
 	ret = runtime·sched.gcount;
 	FLUSH(&ret);
@@ -1781,29 +1575,4 @@ runtime·setcpuprofilerate(void (*fn)(uintptr*, int32), int32 hz)
 
 	if(hz != 0)
 		runtime·resetcpuprofiler(hz);
-}
-
-void (*libcgo_setenv)(byte**);
-
-// Update the C environment if cgo is loaded.
-// Called from syscall.Setenv.
-void
-syscall·setenv_c(String k, String v)
-{
-	byte *arg[2];
-
-	if(libcgo_setenv == nil)
-		return;
-
-	arg[0] = runtime·malloc(k.len + 1);
-	runtime·memmove(arg[0], k.str, k.len);
-	arg[0][k.len] = 0;
-
-	arg[1] = runtime·malloc(v.len + 1);
-	runtime·memmove(arg[1], v.str, v.len);
-	arg[1][v.len] = 0;
-
-	runtime·asmcgocall((void*)libcgo_setenv, arg);
-	runtime·free(arg[0]);
-	runtime·free(arg[1]);
 }

@@ -14,6 +14,7 @@ import (
 	"io/ioutil"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -192,7 +193,7 @@ var respTests = []respTest{
 			Request:       dummyReq("HEAD"),
 			Header:        Header{},
 			Close:         true,
-			ContentLength: 0,
+			ContentLength: -1,
 		},
 
 		"",
@@ -442,5 +443,19 @@ func TestLocationResponse(t *testing.T) {
 		if g, e := got.String(), tt.want; g != e {
 			t.Errorf("%d. Location=%q; want %q", i, g, e)
 		}
+	}
+}
+
+func TestResponseStatusStutter(t *testing.T) {
+	r := &Response{
+		Status:     "123 some status",
+		StatusCode: 123,
+		ProtoMajor: 1,
+		ProtoMinor: 3,
+	}
+	var buf bytes.Buffer
+	r.Write(&buf)
+	if strings.Contains(buf.String(), "123 123") {
+		t.Errorf("stutter in status: %s", buf.String())
 	}
 }

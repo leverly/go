@@ -77,32 +77,32 @@ runtime·futexwakeup(uint32 *addr, uint32 cnt)
 void runtime·thr_start(void*);
 
 void
-runtime·newosproc(M *m, G *g, void *stk, void (*fn)(void))
+runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
 {
 	ThrParam param;
 	Sigset oset;
 
 	USED(fn);	// thr_start assumes fn == mstart
-	USED(g);	// thr_start assumes g == m->g0
+	USED(gp);	// thr_start assumes gp == mp->g0
 
 	if(0){
 		runtime·printf("newosproc stk=%p m=%p g=%p fn=%p id=%d/%d ostk=%p\n",
-			stk, m, g, fn, m->id, m->tls[0], &m);
+			stk, mp, gp, fn, mp->id, mp->tls[0], &mp);
 	}
 
 	runtime·sigprocmask(&sigset_all, &oset);
 	runtime·memclr((byte*)&param, sizeof param);
 
 	param.start_func = runtime·thr_start;
-	param.arg = m;
-	param.stack_base = (int8*)g->stackbase;
-	param.stack_size = (byte*)stk - (byte*)g->stackbase;
-	param.child_tid = (intptr*)&m->procid;
+	param.arg = (byte*)mp;
+	param.stack_base = (void*)gp->stackbase;
+	param.stack_size = (byte*)stk - (byte*)gp->stackbase;
+	param.child_tid = (intptr*)&mp->procid;
 	param.parent_tid = nil;
-	param.tls_base = (int8*)&m->tls[0];
-	param.tls_size = sizeof m->tls;
+	param.tls_base = (void*)&mp->tls[0];
+	param.tls_size = sizeof mp->tls;
 
-	m->tls[0] = m->id;	// so 386 asm can find it
+	mp->tls[0] = mp->id;	// so 386 asm can find it
 
 	runtime·thr_new(&param, sizeof param);
 	runtime·sigprocmask(&oset, nil);
@@ -126,7 +126,7 @@ runtime·minit(void)
 {
 	// Initialize signal handling
 	m->gsignal = runtime·malg(32*1024);
-	runtime·signalstack(m->gsignal->stackguard - StackGuard, 32*1024);
+	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
 	runtime·sigprocmask(&sigset_none, nil);
 }
 
@@ -211,7 +211,11 @@ static int8 badsignal[] = "runtime: signal received on thread not created by Go.
 // This runs on a foreign stack, without an m or a g.  No stack split.
 #pragma textflag 7
 void
-runtime·badsignal(void)
+runtime·badsignal(int32 sig)
 {
+	if (sig == SIGPROF) {
+		return;  // Ignore SIGPROFs intended for a non-Go thread.
+	}
 	runtime·write(2, badsignal, sizeof badsignal - 1);
+	runtime·exit(1);
 }

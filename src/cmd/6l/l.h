@@ -40,7 +40,26 @@
 enum
 {
 	thechar = '6',
-	PtrSize = 8
+	PtrSize = 8,
+	IntSize = 8,
+	
+	// Loop alignment constants:
+	// want to align loop entry to LoopAlign-byte boundary,
+	// and willing to insert at most MaxLoopPad bytes of NOP to do so.
+	// We define a loop entry as the target of a backward jump.
+	//
+	// gcc uses MaxLoopPad = 10 for its 'generic x86-64' config,
+	// and it aligns all jump targets, not just backward jump targets.
+	//
+	// As of 6/1/2012, the effect of setting MaxLoopPad = 10 here
+	// is very slight but negative, so the alignment is disabled by
+	// setting MaxLoopPad = 0. The code is here for reference and
+	// for future experiments.
+	// 
+	LoopAlign = 16,
+	MaxLoopPad = 0,
+
+	FuncAlign = 16
 };
 
 #define	P		((Prog*)0)
@@ -134,11 +153,14 @@ struct	Sym
 	int32	plt;
 	int32	got;
 	int32	align;	// if non-zero, required alignment in bytes
+	int32	elfsym;
 	Sym*	hash;	// in hash table
 	Sym*	allsym;	// in all symbol list
 	Sym*	next;	// in text or data list
 	Sym*	sub;	// in SSUB list
 	Sym*	outer;	// container of sub
+	Sym*	reachparent;
+	Sym*	queue;
 	vlong	value;
 	vlong	size;
 	Sym*	gotype;
@@ -146,6 +168,7 @@ struct	Sym
 	char*	dynimpname;
 	char*	dynimplib;
 	char*	dynimpvers;
+	struct Section*	sect;
 	
 	// STEXT
 	Auto*	autom;
@@ -294,8 +317,8 @@ enum
 EXTERN	int32	HEADR;
 EXTERN	int32	HEADTYPE;
 EXTERN	int32	INITRND;
-EXTERN	vlong	INITTEXT;
-EXTERN	vlong	INITDAT;
+EXTERN	int64	INITTEXT;
+EXTERN	int64	INITDAT;
 EXTERN	char*	INITENTRY;		/* entry point */
 EXTERN	char*	pcstr;
 EXTERN	Auto*	curauto;
@@ -304,7 +327,7 @@ EXTERN	Prog*	curp;
 EXTERN	Sym*	cursym;
 EXTERN	Sym*	datap;
 EXTERN	vlong	elfdatsize;
-EXTERN	char	debug[128];
+EXTERN	int	debug[128];
 EXTERN	char	literal[32];
 EXTERN	Sym*	textp;
 EXTERN	Sym*	etextp;

@@ -53,7 +53,7 @@ func stackGrowthRecursive(i int) {
 	}
 }
 
-func BenchmarkStackGrowth(b *testing.B) {
+func benchmarkStackGrowth(b *testing.B, rec int) {
 	const CallsPerSched = 1000
 	procs := runtime.GOMAXPROCS(-1)
 	N := int32(b.N / CallsPerSched)
@@ -63,7 +63,7 @@ func BenchmarkStackGrowth(b *testing.B) {
 			for atomic.AddInt32(&N, -1) >= 0 {
 				runtime.Gosched()
 				for g := 0; g < CallsPerSched; g++ {
-					stackGrowthRecursive(10)
+					stackGrowthRecursive(rec)
 				}
 			}
 			c <- true
@@ -72,6 +72,14 @@ func BenchmarkStackGrowth(b *testing.B) {
 	for p := 0; p < procs; p++ {
 		<-c
 	}
+}
+
+func BenchmarkStackGrowth(b *testing.B) {
+	benchmarkStackGrowth(b, 10)
+}
+
+func BenchmarkStackGrowthDeep(b *testing.B) {
+	benchmarkStackGrowth(b, 1024)
 }
 
 func BenchmarkSyscall(b *testing.B) {
@@ -120,6 +128,32 @@ func BenchmarkSyscallWork(b *testing.B) {
 		}()
 	}
 	for p := 0; p < procs; p++ {
+		<-c
+	}
+}
+
+func BenchmarkCreateGoroutines(b *testing.B) {
+	benchmarkCreateGoroutines(b, 1)
+}
+
+func BenchmarkCreateGoroutinesParallel(b *testing.B) {
+	benchmarkCreateGoroutines(b, runtime.GOMAXPROCS(-1))
+}
+
+func benchmarkCreateGoroutines(b *testing.B, procs int) {
+	c := make(chan bool)
+	var f func(n int)
+	f = func(n int) {
+		if n == 0 {
+			c <- true
+			return
+		}
+		go f(n - 1)
+	}
+	for i := 0; i < procs; i++ {
+		go f(b.N / procs)
+	}
+	for i := 0; i < procs; i++ {
 		<-c
 	}
 }

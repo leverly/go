@@ -50,11 +50,8 @@ runtime·semacreate(void)
 void
 runtime·osinit(void)
 {
-	// Register our thread-creation callback (see sys_darwin_{amd64,386}.s)
-	// but only if we're not using cgo.  If we are using cgo we need
-	// to let the C pthread libary install its own thread-creation callback.
-	if(!runtime·iscgo)
-		runtime·bsdthread_register();
+	// bsdthread_register delayed until end of goenvs so that we
+	// can look at the environment first.
 
 	// Use sysctl to fetch hw.ncpu.
 	uint32 mib[2];
@@ -75,22 +72,34 @@ void
 runtime·goenvs(void)
 {
 	runtime·goenvs_unix();
+
+	// Register our thread-creation callback (see sys_darwin_{amd64,386}.s)
+	// but only if we're not using cgo.  If we are using cgo we need
+	// to let the C pthread libary install its own thread-creation callback.
+	if(!runtime·iscgo) {
+		if(runtime·bsdthread_register() != 0) {
+			if(runtime·getenv("DYLD_INSERT_LIBRARIES"))
+				runtime·throw("runtime: bsdthread_register error (unset DYLD_INSERT_LIBRARIES)");
+			runtime·throw("runtime: bsdthread_register error");
+		}
+	}
+
 }
 
 void
-runtime·newosproc(M *m, G *g, void *stk, void (*fn)(void))
+runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
 {
 	int32 errno;
 	Sigset oset;
 
-	m->tls[0] = m->id;	// so 386 asm can find it
+	mp->tls[0] = mp->id;	// so 386 asm can find it
 	if(0){
 		runtime·printf("newosproc stk=%p m=%p g=%p fn=%p id=%d/%d ostk=%p\n",
-			stk, m, g, fn, m->id, m->tls[0], &m);
+			stk, mp, gp, fn, mp->id, mp->tls[0], &mp);
 	}
 
 	runtime·sigprocmask(SIG_SETMASK, &sigset_all, &oset);
-	errno = runtime·bsdthread_create(stk, m, g, fn);
+	errno = runtime·bsdthread_create(stk, mp, gp, fn);
 	runtime·sigprocmask(SIG_SETMASK, &oset, nil);
 
 	if(errno < 0) {
@@ -105,7 +114,7 @@ runtime·minit(void)
 {
 	// Initialize signal handling.
 	m->gsignal = runtime·malg(32*1024);	// OS X wants >=8K, Linux >=2K
-	runtime·signalstack(m->gsignal->stackguard - StackGuard, 32*1024);
+	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
 
 	if(m->profilehz > 0)
 		runtime·sigprocmask(SIG_SETMASK, &sigset_none, nil);
@@ -493,7 +502,11 @@ static int8 badsignal[] = "runtime: signal received on thread not created by Go.
 // This runs on a foreign stack, without an m or a g.  No stack split.
 #pragma textflag 7
 void
-runtime·badsignal(void)
+runtime·badsignal(int32 sig)
 {
+	if (sig == SIGPROF) {
+		return;  // Ignore SIGPROFs intended for a non-Go thread.
+	}
 	runtime·write(2, badsignal, sizeof badsignal - 1);
+	runtime·exit(1);
 }

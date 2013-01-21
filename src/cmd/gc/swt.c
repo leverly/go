@@ -259,9 +259,10 @@ casebody(Node *sw, Node *typeswvar)
 	Node *go, *br;
 	int32 lno, needvar;
 
-	lno = setlineno(sw);
 	if(sw->list == nil)
 		return;
+
+	lno = setlineno(sw);
 
 	cas = nil;	// cases
 	stat = nil;	// statements
@@ -270,7 +271,7 @@ casebody(Node *sw, Node *typeswvar)
 
 	for(l=sw->list; l; l=l->next) {
 		n = l->n;
-		lno = setlineno(n);
+		setlineno(n);
 		if(n->op != OXCASE)
 			fatal("casebody %O", n->op);
 		n->op = OCASE;
@@ -442,6 +443,10 @@ exprbsw(Case *c0, int ncase, int arg)
 			n = c0->node;
 			lno = setlineno(n);
 
+			if(assignop(n->left->type, exprname->type, nil) == OCONVIFACE ||
+			   assignop(exprname->type, n->left->type, nil) == OCONVIFACE)
+				goto snorm;
+
 			switch(arg) {
 			case Strue:
 				a = nod(OIF, N, N);
@@ -457,6 +462,7 @@ exprbsw(Case *c0, int ncase, int arg)
 				break;
 
 			default:
+			snorm:
 				a = nod(OIF, N, N);
 				a->ntest = nod(OEQ, exprname, n->left);	// if name == val
 				typecheck(&a->ntest, Erv);
@@ -520,6 +526,8 @@ exprswitch(Node *sw)
 		exprname = temp(sw->ntest->type);
 		cas = list1(nod(OAS, exprname, sw->ntest));
 		typechecklist(cas, Etop);
+	} else {
+		exprname = nodbool(arg == Strue);
 	}
 
 	c0 = mkcaselist(sw, arg);
@@ -786,7 +794,6 @@ typeswitch(Node *sw)
 void
 walkswitch(Node *sw)
 {
-
 	/*
 	 * reorder the body into (OLIST, cases, statements)
 	 * cases have OGOTO into statements.
@@ -813,7 +820,7 @@ typecheckswitch(Node *n)
 {
 	int top, lno, ptr;
 	char *nilonly;
-	Type *t, *missing, *have;
+	Type *t, *badtype, *missing, *have;
 	NodeList *l, *ll;
 	Node *ncase, *nvar;
 	Node *def;
@@ -839,10 +846,14 @@ typecheckswitch(Node *n)
 		} else
 			t = types[TBOOL];
 		if(t) {
-			if(!okforeq[t->etype] || isfixedarray(t))
+			if(!okforeq[t->etype])
 				yyerror("cannot switch on %lN", n->ntest);
-			else if(t->etype == TARRAY)
+			else if(t->etype == TARRAY && !isfixedarray(t))
 				nilonly = "slice";
+			else if(t->etype == TARRAY && isfixedarray(t) && algtype1(t, nil) == ANOEQ)
+				yyerror("cannot switch on %lN", n->ntest);
+			else if(t->etype == TSTRUCT && algtype1(t, &badtype) == ANOEQ)
+				yyerror("cannot switch on %lN (struct containing %T cannot be compared)", n->ntest, badtype);
 			else if(t->etype == TFUNC)
 				nilonly = "func";
 			else if(t->etype == TMAP)
@@ -889,7 +900,7 @@ typecheckswitch(Node *n)
 						yyerror("%lN is not a type", ll->n);
 						// reset to original type
 						ll->n = n->ntest->right;
-					} else if(ll->n->type->etype != TINTER && !implements(ll->n->type, t, &missing, &have, &ptr)) {
+					} else if(ll->n->type->etype != TINTER && t->etype == TINTER && !implements(ll->n->type, t, &missing, &have, &ptr)) {
 						if(have && !missing->broke && !have->broke)
 							yyerror("impossible type switch case: %lN cannot have dynamic type %T"
 								" (wrong type for %S method)\n\thave %S%hT\n\twant %S%hT",

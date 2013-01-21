@@ -6,6 +6,7 @@
 #include "arch_GOARCH.h"
 #include "stack.h"
 #include "cgocall.h"
+#include "race.h"
 
 // Cgo call and callback support.
 //
@@ -41,7 +42,7 @@
 // know about packages).  The gcc-compiled C function f calls GoF.
 //
 // GoF calls crosscall2(_cgoexp_GoF, frame, framesize).  Crosscall2
-// (in cgo/$GOOS.S, a gcc-compiled assembly file) is a two-argument
+// (in cgo/gcc_$GOARCH.S, a gcc-compiled assembly file) is a two-argument
 // adapter from the gcc function call ABI to the 6c function call ABI.
 // It is called from gcc to call 6c functions.  In this case it calls
 // _cgoexp_GoF(frame, framesize), still running on m->g0's stack
@@ -83,6 +84,12 @@
 // callee-save registers for gcc and returns to GoF, which returns to f.
 
 void *initcgo;	/* filled in by dynamic linker when Cgo is available */
+static int64 cgosync;  /* represents possible synchronization in C code */
+
+// These two are only used by the architecture where TLS based storage isn't
+// the default for g and m (e.g., ARM)
+void *cgo_load_gm; /* filled in by dynamic linker when Cgo is available */
+void *cgo_save_gm; /* filled in by dynamic linker when Cgo is available */
 
 static void unlockm(void);
 static void unwindm(void);
@@ -94,11 +101,19 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 {
 	Defer d;
 
+	if(m->racecall) {
+		runtime·asmcgocall(fn, arg);
+		return;
+	}
+
 	if(!runtime·iscgo && !Windows)
 		runtime·throw("cgocall unavailable");
 
 	if(fn == 0)
 		runtime·throw("cgocall nil");
+
+	if(raceenabled)
+		runtime·racereleasemerge(&cgosync);
 
 	m->ncgocall++;
 
@@ -106,7 +121,7 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 	 * Lock g to m to ensure we stay on the same stack if we do a
 	 * cgo callback.
 	 */
-	d.nofree = false;
+	d.special = false;
 	if(m->lockedg == nil) {
 		m->lockedg = g;
 		g->lockedm = m;
@@ -116,9 +131,12 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 		d.siz = 0;
 		d.link = g->defer;
 		d.argp = (void*)-1;  // unused because unlockm never recovers
-		d.nofree = true;
+		d.special = true;
+		d.free = false;
 		g->defer = &d;
 	}
+
+	m->ncgo++;
 
 	/*
 	 * Announce we are entering a system call
@@ -135,12 +153,23 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 	runtime·asmcgocall(fn, arg);
 	runtime·exitsyscall();
 
-	if(d.nofree) {
+	m->ncgo--;
+	if(m->ncgo == 0) {
+		// We are going back to Go and are not in a recursive
+		// call.  Let the GC collect any memory allocated via
+		// _cgo_allocate that is no longer referenced.
+		m->cgomal = nil;
+	}
+
+	if(d.special) {
 		if(g->defer != &d || d.fn != (byte*)unlockm)
 			runtime·throw("runtime: bad defer entry in cgocallback");
 		g->defer = d.link;
 		unlockm();
 	}
+
+	if(raceenabled)
+		runtime·raceacquire(&cgosync);
 }
 
 static void
@@ -153,11 +182,11 @@ unlockm(void)
 void
 runtime·NumCgoCall(int64 ret)
 {
-	M *m;
+	M *mp;
 
 	ret = 0;
-	for(m=runtime·atomicloadp(&runtime·allm); m; m=m->alllink)
-		ret += m->ncgocall;
+	for(mp=runtime·atomicloadp(&runtime·allm); mp; mp=mp->alllink)
+		ret += mp->ncgocall;
 	FLUSH(&ret);
 }
 
@@ -193,6 +222,11 @@ runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
 {
 	Defer d;
 
+	if(m->racecall) {
+		reflect·call((byte*)fn, arg, argsize);
+		return;
+	}
+
 	if(g != m->curg)
 		runtime·throw("runtime: bad g in cgocallback");
 
@@ -203,11 +237,18 @@ runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
 	d.siz = 0;
 	d.link = g->defer;
 	d.argp = (void*)-1;  // unused because unwindm never recovers
-	d.nofree = true;
+	d.special = true;
+	d.free = false;
 	g->defer = &d;
+
+	if(raceenabled)
+		runtime·raceacquire(&cgosync);
 
 	// Invoke callback.
 	reflect·call((byte*)fn, arg, argsize);
+
+	if(raceenabled)
+		runtime·racereleasemerge(&cgosync);
 
 	// Pop defer.
 	// Do not unwind m->g0->sched.sp.
@@ -229,7 +270,8 @@ unwindm(void)
 		runtime·throw("runtime: unwindm not implemented");
 	case '8':
 	case '6':
-		m->g0->sched.sp = *(void**)m->g0->sched.sp;
+	case '5':
+		m->g0->sched.sp = *(uintptr*)m->g0->sched.sp;
 		break;
 	}
 }

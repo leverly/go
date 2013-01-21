@@ -7,13 +7,19 @@ int32	runtime·open(uint8 *file, int32 mode);
 int32	runtime·pread(int32 fd, void *buf, int32 nbytes, int64 offset);
 int32	runtime·pwrite(int32 fd, void *buf, int32 nbytes, int64 offset);
 int32	runtime·read(int32 fd, void *buf, int32 nbytes);
+int64	runtime·seek(int32 fd, int64 offset, int32 whence);
 int32	runtime·close(int32 fd);
 void	runtime·exits(int8* msg);
-int32	runtime·brk_(void*);
+intptr	runtime·brk_(void*);
 int32	runtime·sleep(int32 ms);
-int32	runtime·rfork(int32 flags, void *stk, M *m, G *g, void (*fn)(void));
+int32	runtime·rfork(int32 flags, void *stk, M *mp, G *gp, void (*fn)(void));
 int32	runtime·plan9_semacquire(uint32 *addr, int32 block);
+int32	runtime·plan9_tsemacquire(uint32 *addr, int32 ms);
 int32 	runtime·plan9_semrelease(uint32 *addr, int32 count);
+int32	runtime·notify(void (*fn)(void*, byte*));
+int32	runtime·noted(int32);
+void	runtime·gonote(void*, byte*);
+void	runtime·setfpmasks(void);
 
 /* open */
 enum
@@ -43,6 +49,13 @@ enum
 	RFCFDG          = (1<<12),
 	RFREND          = (1<<13),
 	RFNOMNT         = (1<<14)
+};
+
+/* notify */
+enum
+{
+	NCONT	= 0,
+	NDFLT	= 1
 };
 
 typedef struct Tos Tos;

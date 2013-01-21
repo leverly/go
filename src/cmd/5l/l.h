@@ -36,7 +36,9 @@
 enum
 {
 	thechar = '5',
-	PtrSize = 4
+	PtrSize = 4,
+	IntSize = 4,
+	FuncAlign = 4  // single-instruction alignment
 };
 
 #ifndef	EXTERN
@@ -72,13 +74,12 @@ struct	Adr
 		char*	u0sbig;
 	} u0;
 	Sym*	sym;
+	Sym*	gotype;
+	int32	offset2; // argsize
 	char	type;
-	uchar	index; // not used on arm, required by ld/go.c
 	char	reg;
 	char	name;
-	int32	offset2; // argsize
 	char	class;
-	Sym*	gotype;
 };
 
 #define	offset	u0.u0offset
@@ -107,7 +108,6 @@ struct	Prog
 	} u0;
 	Prog*	cond;
 	Prog*	link;
-	Prog*	dlink;
 	int32	pc;
 	int32	line;
 	int32	spadj;
@@ -116,7 +116,7 @@ struct	Prog
 	uchar	as;
 	uchar	scond;
 	uchar	reg;
-	uchar	align;
+	uchar	align;	// unused
 };
 
 #define	regused	u0.u0regused
@@ -135,8 +135,6 @@ struct	Sym
 	uchar	reachable;
 	uchar	dynexport;
 	uchar	leaf;
-	uchar	stkcheck;
-	uchar	hide;
 	int32	dynid;
 	int32	plt;
 	int32	got;
@@ -144,18 +142,24 @@ struct	Sym
 	int32	sig;
 	int32	size;
 	int32	align;	// if non-zero, required alignment in bytes
+	int32	elfsym;
 	uchar	special;
 	uchar	fnptr;	// used as fn ptr
+	uchar	stkcheck;
+	uchar	hide;
 	Sym*	hash;	// in hash table
 	Sym*	allsym;	// in all symbol list
 	Sym*	next;	// in text or data list
 	Sym*	sub;	// in SSUB list
 	Sym*	outer;	// container of sub
 	Sym*	gotype;
+	Sym*	reachparent;
+	Sym*	queue;
 	char*	file;
 	char*	dynimpname;
 	char*	dynimplib;
 	char*	dynimpvers;
+	struct Section*	sect;
 	
 	// STEXT
 	Auto*	autom;
@@ -211,6 +215,7 @@ enum
 	C_NONE		= 0,
 	C_REG,
 	C_REGREG,
+	C_REGREG2,
 	C_SHIFT,
 	C_FREG,
 	C_PSR,
@@ -280,7 +285,7 @@ EXTERN	Prog*	curp;
 EXTERN	Sym*	cursym;
 EXTERN	Sym*	datap;
 EXTERN	int32 	elfdatsize;
-EXTERN	char	debug[128];
+EXTERN	int	debug[128];
 EXTERN	Sym*	etextp;
 EXTERN	char*	noname;
 EXTERN	Prog*	lastp;
@@ -298,12 +303,13 @@ EXTERN	char*	rpath;
 EXTERN	uint32	stroffset;
 EXTERN	int32	symsize;
 EXTERN	Sym*	textp;
-EXTERN	int32	textsize;
 EXTERN	int	version;
 EXTERN	char	xcmp[C_GOK+1][C_GOK+1];
 EXTERN	Prog	zprg;
 EXTERN	int	dtype;
+EXTERN	int	tlsoffset;
 EXTERN	int	armsize;
+EXTERN	int	goarm;
 
 extern	char*	anames[];
 extern	Optab	optab[];
@@ -311,6 +317,8 @@ extern	Optab	optab[];
 void	addpool(Prog*, Adr*);
 EXTERN	Prog*	blitrl;
 EXTERN	Prog*	elitrl;
+
+EXTERN	int	goarm;
 
 void	initdiv(void);
 EXTERN	Prog*	prog_div;
@@ -398,6 +406,9 @@ void	span(void);
 void	strnput(char*, int);
 int32	symaddr(Sym*);
 void	undef(void);
+void	vputb(uint64);
+void	vputl(uint64);
+void	wputb(uint16);
 void	wput(int32);
 void    wputl(ushort w);
 void	xdefine(char*, int, int32);
@@ -407,8 +418,9 @@ int32	immaddr(int32);
 int32	opbra(int, int);
 int	brextra(Prog*);
 int	isbranch(Prog*);
-void fnptrs(void);
+void	fnptrs(void);
 void	doelf(void);
+void	dozerostk(void); // used by -Z
 
 vlong		addaddr(Sym *s, Sym *t);
 vlong		addsize(Sym *s, Sym *t);
@@ -425,3 +437,9 @@ vlong		adduintxx(Sym *s, uint64 v, int wid);
 #define	VPUT(a)	abort()
 
 #endif
+
+/* Used by ../ld/dwarf.c */
+enum
+{
+	DWARFREGSP = 13
+};

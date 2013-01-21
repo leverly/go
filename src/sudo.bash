@@ -12,12 +12,23 @@ Darwin)
 	exit 0
 esac
 
+# Check that the go command exists
+if ! go help >/dev/null 2>&1; then
+	echo "The go command is not in your PATH." >&2
+	exit 2
+fi
+
+eval $(go env)
+if ! [ -x $GOTOOLDIR/cov -a -x $GOTOOLDIR/prof ]; then
+	echo "You don't need to run sudo.bash." >&2
+	exit 2
+fi
+
 if [[ ! -d /usr/local/bin ]]; then
 	echo 1>&2 'sudo.bash: problem with /usr/local/bin; cannot install tools.'
 	exit 2
 fi
 
-eval $(go env)
 cd $(dirname $0)
 for i in prof cov
 do

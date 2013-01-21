@@ -162,6 +162,16 @@ convlit1(Node **np, Type *t, int explicit)
 		case TFUNC:
 		case TUNSAFEPTR:
 			break;
+
+		case TUINTPTR:
+			// A nil literal may be converted to uintptr
+			// if it is an unsafe.Pointer
+			if(n->type->etype == TUNSAFEPTR) {
+				n->val.u.xval = mal(sizeof(*n->val.u.xval));
+				mpmovecfix(n->val.u.xval, 0);
+				n->val.ctype = CTINT;
+			} else
+				goto bad;
 		}
 		break;
 
@@ -348,13 +358,9 @@ toint(Val v)
 	return v;
 }
 
-void
-overflow(Val v, Type *t)
+int
+doesoverflow(Val v, Type *t)
 {
-	// v has already been converted
-	// to appropriate form for t.
-	if(t == T || t->etype == TIDEAL)
-		return;
 	switch(v.ctype) {
 	case CTINT:
 	case CTRUNE:
@@ -362,14 +368,14 @@ overflow(Val v, Type *t)
 			fatal("overflow: %T integer constant", t);
 		if(mpcmpfixfix(v.u.xval, minintval[t->etype]) < 0 ||
 		   mpcmpfixfix(v.u.xval, maxintval[t->etype]) > 0)
-			yyerror("constant %B overflows %T", v.u.xval, t);
+			return 1;
 		break;
 	case CTFLT:
 		if(!isfloat[t->etype])
 			fatal("overflow: %T floating-point constant", t);
 		if(mpcmpfltflt(v.u.fval, minfltval[t->etype]) <= 0 ||
 		   mpcmpfltflt(v.u.fval, maxfltval[t->etype]) >= 0)
-			yyerror("constant %#F overflows %T", v.u.fval, t);
+			return 1;
 		break;
 	case CTCPLX:
 		if(!iscomplex[t->etype])
@@ -378,7 +384,33 @@ overflow(Val v, Type *t)
 		   mpcmpfltflt(&v.u.cval->real, maxfltval[t->etype]) >= 0 ||
 		   mpcmpfltflt(&v.u.cval->imag, minfltval[t->etype]) <= 0 ||
 		   mpcmpfltflt(&v.u.cval->imag, maxfltval[t->etype]) >= 0)
-			yyerror("constant %#F overflows %T", v.u.fval, t);
+			return 1;
+		break;
+	}
+	return 0;
+}
+
+void
+overflow(Val v, Type *t)
+{
+	// v has already been converted
+	// to appropriate form for t.
+	if(t == T || t->etype == TIDEAL)
+		return;
+
+	if(!doesoverflow(v, t))
+		return;
+
+	switch(v.ctype) {
+	case CTINT:
+	case CTRUNE:
+		yyerror("constant %B overflows %T", v.u.xval, t);
+		break;
+	case CTFLT:
+		yyerror("constant %#F overflows %T", v.u.fval, t);
+		break;
+	case CTCPLX:
+		yyerror("constant %#F overflows %T", v.u.fval, t);
 		break;
 	}
 }
@@ -1012,12 +1044,13 @@ defaultlit(Node **np, Type *t)
 		}
 		n->type = t;
 		return;
+	case OCOM:
 	case ONOT:
 		defaultlit(&n->left, t);
 		n->type = n->left->type;
 		return;
 	default:
-		if(n->left == N) {
+		if(n->left == N || n->right == N) {
 			dump("defaultlit", n);
 			fatal("defaultlit");
 		}
@@ -1029,6 +1062,11 @@ defaultlit(Node **np, Type *t)
 		// When compiling x := 1<<i + 3.14, this means we try to push
 		// the float64 down into the 1<<i, producing the correct error
 		// (cannot shift float64).
+		//
+		// If t is an interface type, we want the default type for the
+		// value, so just do as if no type was given.
+		if(t && t->etype == TINTER)
+			t = T;
 		if(t == T && (n->right->op == OLSH || n->right->op == ORSH)) {
 			defaultlit(&n->left, T);
 			defaultlit(&n->right, n->left->type);
@@ -1206,6 +1244,7 @@ smallintconst(Node *n)
 	case TIDEAL:
 	case TINT64:
 	case TUINT64:
+	case TPTR64:
 		if(mpcmpfixfix(n->val.u.xval, minintval[TINT32]) < 0
 		|| mpcmpfixfix(n->val.u.xval, maxintval[TINT32]) > 0)
 			break;

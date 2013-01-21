@@ -300,6 +300,7 @@ enum
 	OPOSTINC,
 	OPREDEC,
 	OPREINC,
+	OPREFETCH,
 	OPROTO,
 	OREGISTER,
 	ORETURN,
@@ -324,6 +325,7 @@ enum
 	OINDEX,
 	OFAS,
 	OREGPAIR,
+	OROTL,
 
 	OEND
 };
@@ -473,7 +475,7 @@ EXTERN	int	autobn;
 EXTERN	int32	autoffset;
 EXTERN	int	blockno;
 EXTERN	Decl*	dclstack;
-EXTERN	char	debug[256];
+EXTERN	int	debug[256];
 EXTERN	Hist*	ehist;
 EXTERN	int32	firstbit;
 EXTERN	Sym*	firstarg;
@@ -773,6 +775,8 @@ void	pragtextflag(void);
 void	pragincomplete(void);
 void	pragdynimport(void);
 void	pragdynexport(void);
+void	pragdynlinker(void);
+EXTERN	char *dynlinker;
 
 /*
  * calls to machine depend part

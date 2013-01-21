@@ -34,6 +34,7 @@ func printStderr(args ...interface{}) (int, error) {
 }
 
 func runRun(cmd *Command, args []string) {
+	raceInit()
 	var b builder
 	b.init()
 	b.print = printStderr
@@ -49,6 +50,10 @@ func runRun(cmd *Command, args []string) {
 	if p.Error != nil {
 		fatalf("%s", p.Error)
 	}
+	for _, err := range p.DepsErrors {
+		errorf("%s", err)
+	}
+	exitIfErrors()
 	if p.Name != "main" {
 		fatalf("go run: cannot run non-main package")
 	}
@@ -79,6 +84,7 @@ func runStdin(cmdargs ...interface{}) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	startSigHandlers()
 	if err := cmd.Run(); err != nil {
 		errorf("%v", err)
 	}

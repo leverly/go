@@ -82,20 +82,18 @@ typecheckinl(Node *fn)
 	Pkg *pkg;
 	int save_safemode, lno;
 
-	if(fn->typecheck)
-		return;
-
 	lno = setlineno(fn);
+
+	// typecheckinl is only for imported functions;
+	// their bodies may refer to unsafe as long as the package
+	// was marked safe during import (which was checked then).
+	// the ->inl of a local function has been typechecked before caninl copied it.
+	pkg = fnpkg(fn);
+	if (pkg == localpkg || pkg == nil)
+		return; // typecheckinl on local function
 
 	if (debug['m']>2)
 		print("typecheck import [%S] %lN { %#H }\n", fn->sym, fn, fn->inl);
-
-	// typecheckinl is only used for imported functions;
-	// their bodies may refer to unsafe as long as the package
-	// was marked safe during import (which was checked then).
-	pkg = fnpkg(fn);
-	if (pkg == localpkg || pkg == nil)
-		fatal("typecheckinl on local function %lN", fn);
 
 	save_safemode = safemode;
 	safemode = 0;
@@ -103,7 +101,6 @@ typecheckinl(Node *fn)
 	savefn = curfn;
 	curfn = fn;
 	typechecklist(fn->inl, Etop);
-	fn->typecheck = 1;
 	curfn = savefn;
 
 	safemode = save_safemode;
@@ -111,10 +108,9 @@ typecheckinl(Node *fn)
 	lineno = lno;
 }
 
-// Caninl determines whether fn is inlineable. Currently that means:
-// fn is exactly 1 statement, either a return or an assignment, and
-// some temporary constraints marked TODO.  If fn is inlineable, saves
-// fn->nbody in fn->inl and substitutes it with a copy.
+// Caninl determines whether fn is inlineable.
+// If so, caninl saves fn->nbody in fn->inl and substitutes it with a copy.
+// fn and ->nbody will already have been typechecked.
 void
 caninl(Node *fn)
 {
@@ -131,6 +127,9 @@ caninl(Node *fn)
 	if(fn->nbody == nil)
 		return;
 
+	if(fn->typecheck == 0)
+		fatal("caninl on non-typechecked function %N", fn);
+
 	// can't handle ... args yet
 	for(t=fn->type->type->down->down->type; t; t=t->down)
 		if(t->isddd)
@@ -145,8 +144,6 @@ caninl(Node *fn)
 
 	fn->nname->inl = fn->nbody;
 	fn->nbody = inlcopylist(fn->nname->inl);
-	// nbody will have been typechecked, so we can set this:
-	fn->typecheck = 1;
 
 	// hack, TODO, check for better way to link method nodes back to the thing with the ->inl
 	// this is so export can find the body of a method
@@ -195,18 +192,10 @@ ishairy(Node *n, int *budget)
 	case OSWITCH:
 	case OPROC:
 	case ODEFER:
-	case ODCL:	// declares locals as globals b/c of @"". qualification
 	case ODCLTYPE:  // can't print yet
 	case ODCLCONST:  // can't print yet
 		return 1;
 
-		break;
-	case OAS:
-		// x = <N> zero initializing assignments aren't representible in export yet.
-		// alternatively we may just skip them in printing and hope their DCL printed
-		// as a var will regenerate it
-		if(n->right == N)
-			return 1;
 		break;
 	}
 
@@ -366,8 +355,8 @@ inlnode(Node **np)
 		}
 
 	case OCLOSURE:
-		// TODO do them here instead of in lex.c phase 6b, so escape analysis
-		// can avoid more heapmoves.
+		// TODO do them here (or earlier) instead of in walkcallclosure,
+		// so escape analysis can avoid more heapmoves.
 		return;
 	}
 
@@ -506,6 +495,19 @@ mkinlcall(Node **np, Node *fn)
 	mkinlcall1(np, fn);
 	safemode = save_safemode;
 }
+
+static Node*
+tinlvar(Type *t)
+{
+	if(t->nname && !isblank(t->nname)) {
+		if(!t->nname->inlvar)
+			fatal("missing inlvar for %N\n", t->nname);
+		return t->nname->inlvar;
+	}
+	typecheck(&nblank, Erv | Easgn);
+	return nblank;
+}
+
 // if *np is a call, and fn is a function with an inlinable body, substitute *np with an OINLCALL.
 // On return ninit has the parameter assignments, the nbody is the
 // inlined function body and list, rlist contain the input, output
@@ -514,6 +516,7 @@ static void
 mkinlcall1(Node **np, Node *fn)
 {
 	int i;
+	int chkargcount;
 	Node *n, *call, *saveinlfn, *as, *m;
 	NodeList *dcl, *ll, *ninit, *body;
 	Type *t;
@@ -554,6 +557,8 @@ mkinlcall1(Node **np, Node *fn)
 	for(ll = dcl; ll; ll=ll->next)
 		if(ll->n->op == ONAME) {
 			ll->n->inlvar = inlvar(ll->n);
+			// Typecheck because inlvar is not necessarily a function parameter.
+			typecheck(&ll->n->inlvar, Erv);
 			ninit = list(ninit, nod(ODCL, ll->n->inlvar, N));  // otherwise gen won't emit the allocations for heapallocs
 			if (ll->n->class == PPARAMOUT)  // we rely on the order being correct here
 				inlretvars = list(inlretvars, ll->n->inlvar);
@@ -567,66 +572,54 @@ mkinlcall1(Node **np, Node *fn)
 			inlretvars = list(inlretvars, m);
 		}
 
-	// assign arguments to the parameters' temp names
-	as = N;
-	if(fn->type->thistuple) {
+	// assign receiver.
+	if(fn->type->thistuple && n->left->op == ODOTMETH) {
+		// method call with a receiver.
 		t = getthisx(fn->type)->type;
 		if(t != T && t->nname != N && !isblank(t->nname) && !t->nname->inlvar)
 			fatal("missing inlvar for %N\n", t->nname);
-
-		if(n->left->op == ODOTMETH) {
-			if(!n->left->left)
-				fatal("method call without receiver: %+N", n);
-			if(t == T)
-				fatal("method call unknown receiver type: %+N", n);
-			if(t->nname != N && !isblank(t->nname))
-				as = nod(OAS, t->nname->inlvar, n->left->left);
-			else
-				as = nod(OAS, temp(t->type), n->left->left);
-		} else {  // non-method call to method
-			if (!n->list)
-				fatal("non-method call to method without first arg: %+N", n);
-			if(t != T && t->nname != N && !isblank(t->nname))
-				as = nod(OAS, t->nname->inlvar, n->list->n);
-		}
-
+		if(!n->left->left)
+			fatal("method call without receiver: %+N", n);
+		if(t == T)
+			fatal("method call unknown receiver type: %+N", n);
+		as = nod(OAS, tinlvar(t), n->left->left);
 		if(as != N) {
 			typecheck(&as, Etop);
 			ninit = list(ninit, as);
 		}
 	}
 
+	// assign arguments to the parameters' temp names
 	as = nod(OAS2, N, N);
-	if(fn->type->intuple > 1 && n->list && !n->list->next) {
-		// TODO check that n->list->n is a call?
-		// TODO: non-method call to T.meth(f()) where f returns t, args...
-		as->rlist = n->list;
-		for(t = getinargx(fn->type)->type; t; t=t->down) {
-			if(t->nname && !isblank(t->nname)) {
-				if(!t->nname->inlvar)
-					fatal("missing inlvar for %N\n", t->nname);
-				as->list = list(as->list, t->nname->inlvar);
-			} else {
-				as->list = list(as->list, temp(t->type));
-			}
-		}		
-	} else {
-		ll = n->list;
-		if(fn->type->thistuple && n->left->op != ODOTMETH) // non method call to method
-			ll=ll->next;  // was handled above in if(thistuple)
+	as->rlist = n->list;
+	ll = n->list;
 
-		for(t = getinargx(fn->type)->type; t && ll; t=t->down) {
-			if(t->nname && !isblank(t->nname)) {
-				if(!t->nname->inlvar)
-					fatal("missing inlvar for %N\n", t->nname);
-				as->list = list(as->list, t->nname->inlvar);
-				as->rlist = list(as->rlist, ll->n);
-			}
+	// TODO: if len(nlist) == 1 but multiple args, check that n->list->n is a call?
+	if(fn->type->thistuple && n->left->op != ODOTMETH) {
+		// non-method call to method
+		if(!n->list)
+			fatal("non-method call to method without first arg: %+N", n);
+		// append receiver inlvar to LHS.
+		t = getthisx(fn->type)->type;
+		if(t != T && t->nname != N && !isblank(t->nname) && !t->nname->inlvar)
+			fatal("missing inlvar for %N\n", t->nname);
+		if(t == T)
+			fatal("method call unknown receiver type: %+N", n);
+		as->list = list(as->list, tinlvar(t));
+		ll = ll->next; // track argument count.
+	}
+
+	// append ordinary arguments to LHS.
+	chkargcount = n->list && n->list->next;
+	for(t = getinargx(fn->type)->type; t && (!chkargcount || ll); t=t->down) {
+		if(chkargcount && ll) {
+			// len(n->list) > 1, count arguments.
 			ll=ll->next;
 		}
-		if(ll || t)
-			fatal("arg count mismatch: %#T  vs %,H\n",  getinargx(fn->type), n->list);
+		as->list = list(as->list, tinlvar(t));
 	}
+	if(chkargcount && (ll || t))
+		fatal("arg count mismatch: %#T  vs %,H\n",  getinargx(fn->type), n->list);
 
 	if (as->rlist) {
 		typecheck(&as, Etop);
@@ -706,7 +699,7 @@ retvar(Type *t, int i)
 {
 	Node *n;
 
-	snprint(namebuf, sizeof(namebuf), ".r%d", i);
+	snprint(namebuf, sizeof(namebuf), "~r%d", i);
 	n = newname(lookup(namebuf));
 	n->type = t->type;
 	n->class = PAUTO;
