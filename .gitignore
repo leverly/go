@@ -1,8 +1,10 @@
 *.8
 *.6
 *.out
-pkg/
+*.a
 bin/
+pkg/linux_386/cgocall.h
+pkg/linux_386/runtime.h
 doc/articles/wiki/get.bin
 src/cmd/8l/enam.c
 src/cmd/dist/dist
