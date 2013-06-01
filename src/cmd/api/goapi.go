@@ -38,9 +38,7 @@ import (
 
 // Flags
 var (
-	// TODO(bradfitz): once Go 1.1 comes out, allow the -c flag to take a comma-separated
-	// list of files, rather than just one.
-	checkFile  = flag.String("c", "", "optional filename to check API against")
+	checkFile  = flag.String("c", "", "optional comma-separated filename(s) to check API against")
 	allowNew   = flag.Bool("allow_new", true, "allow API additions")
 	exceptFile = flag.String("except", "", "optional filename of packages that are allowed to change without triggering a failure in the tool")
 	nextFile   = flag.String("next", "", "optional filename of tentative upcoming API features for the next release. This file can be lazily maintained. It only affects the delta warnings from the -c file printed on success.")
@@ -138,9 +136,7 @@ func main() {
 		}
 
 		for _, pkg := range pkgs {
-			if strings.HasPrefix(pkg, "cmd/") ||
-				strings.HasPrefix(pkg, "exp/") ||
-				strings.HasPrefix(pkg, "old/") {
+			if strings.HasPrefix(pkg, "cmd/") {
 				continue
 			}
 			if fi, err := os.Stat(filepath.Join(w.root, pkg)); err != nil || !fi.IsDir() {
@@ -188,7 +184,10 @@ func main() {
 		return
 	}
 
-	required := fileFeatures(*checkFile)
+	var required []string
+	for _, file := range strings.Split(*checkFile, ",") {
+		required = append(required, fileFeatures(file)...)
+	}
 	optional := fileFeatures(*nextFile)
 	exception := fileFeatures(*exceptFile)
 	fail = !compareAPI(bw, features, required, optional, exception)
@@ -725,7 +724,6 @@ func (w *Walker) varValueType(vi interface{}) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown const value type %T", vi)
 	}
-	panic("unreachable")
 }
 
 // resolveName finds a top-level node named name and returns the node
@@ -778,8 +776,7 @@ func (w *Walker) walkConst(vs *ast.ValueSpec) {
 				}
 			}
 		}
-		if strings.HasPrefix(litType, constDepPrefix) {
-			dep := litType[len(constDepPrefix):]
+		if dep := strings.TrimPrefix(litType, constDepPrefix); dep != litType {
 			w.constDep[ident.Name] = dep
 			continue
 		}
@@ -879,7 +876,7 @@ func (w *Walker) walkTypeSpec(ts *ast.TypeSpec) {
 	case *ast.InterfaceType:
 		w.walkInterfaceType(name, t)
 	default:
-		w.emitFeature(fmt.Sprintf("type %s %s", name, w.nodeString(ts.Type)))
+		w.emitFeature(fmt.Sprintf("type %s %s", name, w.nodeString(w.namelessType(ts.Type))))
 	}
 }
 
@@ -1120,7 +1117,13 @@ func (w *Walker) namelessFieldList(fl *ast.FieldList) *ast.FieldList {
 	fl2 := &ast.FieldList{}
 	if fl != nil {
 		for _, f := range fl.List {
-			fl2.List = append(fl2.List, w.namelessField(f))
+			repeats := 1
+			if len(f.Names) > 1 {
+				repeats = len(f.Names)
+			}
+			for i := 0; i < repeats; i++ {
+				fl2.List = append(fl2.List, w.namelessField(f))
+			}
 		}
 	}
 	return fl2
@@ -1134,9 +1137,20 @@ func (w *Walker) namelessField(f *ast.Field) *ast.Field {
 	}
 }
 
+var (
+	byteRx = regexp.MustCompile(`\bbyte\b`)
+	runeRx = regexp.MustCompile(`\brune\b`)
+)
+
 func (w *Walker) emitFeature(feature string) {
 	if !w.wantedPkg[w.curPackageName] {
 		return
+	}
+	if strings.Contains(feature, "byte") {
+		feature = byteRx.ReplaceAllString(feature, "uint8")
+	}
+	if strings.Contains(feature, "rune") {
+		feature = runeRx.ReplaceAllString(feature, "int32")
 	}
 	f := strings.Join(w.scope, ", ") + ", " + feature
 	if _, dup := w.features[f]; dup {
@@ -1153,6 +1167,7 @@ func (w *Walker) emitFeature(feature string) {
 		}
 		panic("feature contains newlines: " + f)
 	}
+
 	w.features[f] = true
 	if *verbose {
 		log.Printf("feature: %s", f)

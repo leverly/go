@@ -60,10 +60,11 @@ func TestAfterStress(t *testing.T) {
 			Sleep(Nanosecond)
 		}
 	}()
-	c := Tick(1)
+	ticker := NewTicker(1)
 	for i := 0; i < 100; i++ {
-		<-c
+		<-ticker.C
 	}
+	ticker.Stop()
 	atomic.StoreUint32(&stop, 1)
 }
 
@@ -247,26 +248,69 @@ func TestSleepZeroDeadlock(t *testing.T) {
 	<-c
 }
 
-func TestReset(t *testing.T) {
-	t0 := NewTimer(100 * Millisecond)
-	Sleep(50 * Millisecond)
-	if t0.Reset(150*Millisecond) != true {
-		t.Fatalf("resetting unfired timer returned false")
+func testReset(d Duration) error {
+	t0 := NewTimer(2 * d)
+	Sleep(d)
+	if t0.Reset(3*d) != true {
+		return errors.New("resetting unfired timer returned false")
 	}
-	Sleep(100 * Millisecond)
+	Sleep(2 * d)
 	select {
 	case <-t0.C:
-		t.Fatalf("timer fired early")
+		return errors.New("timer fired early")
 	default:
 	}
-	Sleep(100 * Millisecond)
+	Sleep(2 * d)
 	select {
 	case <-t0.C:
 	default:
-		t.Fatalf("reset timer did not fire")
+		return errors.New("reset timer did not fire")
 	}
 
 	if t0.Reset(50*Millisecond) != false {
-		t.Fatalf("resetting expired timer returned true")
+		return errors.New("resetting expired timer returned true")
+	}
+	return nil
+}
+
+func TestReset(t *testing.T) {
+	// We try to run this test with increasingly larger multiples
+	// until one works so slow, loaded hardware isn't as flaky,
+	// but without slowing down fast machines unnecessarily.
+	const unit = 25 * Millisecond
+	tries := []Duration{
+		1 * unit,
+		3 * unit,
+		7 * unit,
+		15 * unit,
+	}
+	var err error
+	for _, d := range tries {
+		err = testReset(d)
+		if err == nil {
+			t.Logf("passed using duration %v", d)
+			return
+		}
+	}
+	t.Error(err)
+}
+
+// Test that sleeping for an interval so large it overflows does not
+// result in a short sleep duration.
+func TestOverflowSleep(t *testing.T) {
+	const timeout = 25 * Millisecond
+	const big = Duration(int64(1<<63 - 1))
+	select {
+	case <-After(big):
+		t.Fatalf("big timeout fired")
+	case <-After(timeout):
+		// OK
+	}
+	const neg = Duration(-1 << 63)
+	select {
+	case <-After(neg):
+		// OK
+	case <-After(timeout):
+		t.Fatalf("negative timeout didn't fire")
 	}
 }

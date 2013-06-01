@@ -80,7 +80,7 @@ void	cgen_dcl(Node*);
 int	needconvert(Type*, Type*);
 void	genconv(Type*, Type*);
 void	allocparams(void);
-void	checklabels();
+void	checklabels(void);
 void	ginscall(Node*, int);
 int	gen_as_init(Node*);
 void	clearslim(Node*);
@@ -130,7 +130,7 @@ Plist*	newplist(void);
 int	isfat(Type*);
 void	sudoclean(void);
 int	sudoaddable(int, Node*, Addr*);
-void	afunclit(Addr*);
+void	afunclit(Addr*, Node*);
 void	nodfconst(Node*, Type*, Mpflt*);
 void	gtrack(Sym*);
 

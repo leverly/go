@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include <sys/types.h>
+#include <machine/sysarch.h>
 #include <pthread.h>
 #include <string.h>
 #include "libcgo.h"
@@ -16,18 +18,34 @@ static void *threadentry(void*);
 // Note: all three functions will clobber R0, and the last
 // two can be called from 5c ABI code.
 void __aeabi_read_tp(void) __attribute__((naked));
-void cgo_tls_set_gm(void) __attribute__((naked));
-void cgo_tls_get_gm(void) __attribute__((naked));
-void __aeabi_read_tp(void) {
-	// read @ 0xffff1000
+void x_cgo_save_gm(void) __attribute__((naked));
+void x_cgo_load_gm(void) __attribute__((naked));
+
+void
+__aeabi_read_tp(void)
+{
 	__asm__ __volatile__ (
+#ifdef ARM_TP_ADDRESS
+		// ARM_TP_ADDRESS is (ARM_VECTORS_HIGH + 0x1000) or 0xffff1000
+		// GCC inline asm doesn't provide a way to provide a constant
+		// to "ldr r0, =??" pseudo instruction, so we hardcode the value
+		// and check it with cpp.
+#if ARM_TP_ADDRESS != 0xffff1000
+#error Wrong ARM_TP_ADDRESS!
+#endif
 		"ldr r0, =0xffff1000\n\t"
 		"ldr r0, [r0]\n\t"
+#else
+		"mrc p15, 0, r0, c13, c0, 3\n\t"
+#endif
 		"mov pc, lr\n\t"
 	);
 }
+
 // g (R10) at 8(TP), m (R9) at 12(TP)
-void cgo_tls_get_gm(void) {
+void
+x_cgo_load_gm(void)
+{
 	__asm__ __volatile__ (
 		"push {lr}\n\t"
 		"bl __aeabi_read_tp\n\t"
@@ -36,7 +54,10 @@ void cgo_tls_get_gm(void) {
 		"pop {pc}\n\t"
 	);
 }
-void cgo_tls_set_gm(void) {
+
+void
+x_cgo_save_gm(void)
+{
 	__asm__ __volatile__ (
 		"push {lr}\n\t"
 		"bl __aeabi_read_tp\n\t"
@@ -45,16 +66,13 @@ void cgo_tls_set_gm(void) {
 		"pop {pc}\n\t"
 	);
 }
-// both cgo_tls_{get,set}_gm can be called from runtime
-void (*cgo_load_gm)(void) = cgo_tls_get_gm;
-void (*cgo_save_gm)(void) = cgo_tls_set_gm;
 
-static void
-xinitcgo(G *g)
+void
+x_cgo_init(G *g)
 {
 	pthread_attr_t attr;
 	size_t size;
-	cgo_tls_set_gm(); // save g and m for the initial thread
+	x_cgo_save_gm(); // save g and m for the initial thread
 
 	pthread_attr_init(&attr);
 	pthread_attr_getstacksize(&attr, &size);
@@ -62,10 +80,9 @@ xinitcgo(G *g)
 	pthread_attr_destroy(&attr);
 }
 
-void (*initcgo)(G*) = xinitcgo;
 
 void
-libcgo_sys_thread_start(ThreadStart *ts)
+_cgo_sys_thread_start(ThreadStart *ts)
 {
 	pthread_attr_t attr;
 	pthread_t p;
@@ -99,7 +116,7 @@ threadentry(void *v)
 	ts.g->stackbase = (uintptr)&ts;
 
 	/*
-	 * libcgo_sys_thread_start set stackguard to stack size;
+	 * _cgo_sys_thread_start set stackguard to stack size;
 	 * change to actual guard pointer.
 	 */
 	ts.g->stackguard = (uintptr)&ts - ts.g->stackguard + 4096 * 2;

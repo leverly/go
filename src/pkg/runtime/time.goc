@@ -15,7 +15,6 @@ package time
 
 static Timers timers;
 static void addtimer(Timer*);
-static bool deltimer(Timer*);
 
 // Package time APIs.
 // Godoc uses the comments in package time, not these.
@@ -31,15 +30,13 @@ func Sleep(ns int64) {
 func startTimer(t *Timer) {
 	if(raceenabled)
 		runtime·racerelease(t);
-	runtime·lock(&timers);
-	addtimer(t);
-	runtime·unlock(&timers);
+	runtime·addtimer(t);
 }
 
 // stopTimer removes t from the timer heap if it is there.
 // It returns true if t was removed, false if t wasn't even there.
 func stopTimer(t *Timer) (stopped bool) {
-	stopped = deltimer(t);
+	stopped = runtime·deltimer(t);
 }
 
 // C runtime.
@@ -57,6 +54,8 @@ ready(int64 now, Eface e)
 	runtime·ready(e.data);
 }
 
+static FuncVal readyv = {(void(*)(void))ready};
+
 // Put the current goroutine to sleep for ns nanoseconds.
 void
 runtime·tsleep(int64 ns, int8 *reason)
@@ -68,11 +67,21 @@ runtime·tsleep(int64 ns, int8 *reason)
 
 	t.when = runtime·nanotime() + ns;
 	t.period = 0;
-	t.f = ready;
+	t.fv = &readyv;
 	t.arg.data = g;
 	runtime·lock(&timers);
 	addtimer(&t);
 	runtime·park(runtime·unlock, &timers, reason);
+}
+
+static FuncVal timerprocv = {timerproc};
+
+void
+runtime·addtimer(Timer *t)
+{
+	runtime·lock(&timers);
+	addtimer(t);
+	runtime·unlock(&timers);
 }
 
 // Add a timer to the heap and start or kick the timer proc
@@ -108,15 +117,17 @@ addtimer(Timer *t)
 			runtime·ready(timers.timerproc);
 		}
 	}
-	if(timers.timerproc == nil)
-		timers.timerproc = runtime·newproc1((byte*)timerproc, nil, 0, 0, addtimer);
+	if(timers.timerproc == nil) {
+		timers.timerproc = runtime·newproc1(&timerprocv, nil, 0, 0, addtimer);
+		timers.timerproc->issystem = true;
+	}
 }
 
 // Delete timer t from the heap.
 // Do not need to update the timerproc:
 // if it wakes up early, no big deal.
-static bool
-deltimer(Timer *t)
+bool
+runtime·deltimer(Timer *t)
 {
 	int32 i;
 
@@ -180,7 +191,7 @@ timerproc(void)
 				siftdown(0);
 				t->i = -1;  // mark as removed
 			}
-			f = t->f;
+			f = (void*)t->fv->fn;
 			arg = t->arg;
 			runtime·unlock(&timers);
 			if(raceenabled)
@@ -198,7 +209,7 @@ timerproc(void)
 		timers.sleeping = true;
 		runtime·noteclear(&timers.waitnote);
 		runtime·unlock(&timers);
-		runtime·entersyscall();
+		runtime·entersyscallblock();
 		runtime·notetsleep(&timers.waitnote, delta);
 		runtime·exitsyscall();
 	}

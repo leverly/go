@@ -105,9 +105,15 @@ static struct {
 		"#define	m(r)	4(r)\n"
 	},
 	{"386", "plan9",
+		"// Plan 9 does not have per-process segment descriptors with\n"
+		"// which to do thread-local storage. Instead, we will use a\n"
+		"// fixed offset from the per-process TOS struct address for\n"
+		"// the local storage. Since the process ID is contained in the\n"
+		"// TOS struct, we specify an offset for that here as well.\n"
 		"#define	get_tls(r)	MOVL _tos(SB), r \n"
 		"#define	g(r)	-8(r)\n"
 		"#define	m(r)	-4(r)\n"
+		"#define	procid(r)	48(r)\n"
 	},
 	{"386", "linux",
 		"// On Linux systems, what we call 0(GS) and 4(GS) for g and m\n"
@@ -127,12 +133,17 @@ static struct {
 		"// which is where these macros come into play.\n"
 		"// get_tls sets up the temporary and then g and r use it.\n"
 		"//\n"
-		"// The final wrinkle is that get_tls needs to read from %gs:0,\n"
+		"// Another wrinkle is that get_tls needs to read from %gs:0,\n"
 		"// but in 8l input it's called 8(GS), because 8l is going to\n"
 		"// subtract 8 from all the offsets, as described above.\n"
+		"//\n"
+		"// The final wrinkle is that when generating an ELF .o file for\n"
+		"// external linking mode, we need to be able to relocate the\n"
+		"// -8(r) and -4(r) instructions. Tag them with an extra (GS*1)\n"
+		"// that is ignored by the linker except for that identification.\n"
 		"#define	get_tls(r)	MOVL 8(GS), r\n"
-		"#define	g(r)	-8(r)\n"
-		"#define	m(r)	-4(r)\n"
+		"#define	g(r)	-8(r)(GS*1)\n"
+		"#define	m(r)	-4(r)(GS*1)\n"
 	},
 	{"386", "",
 		"#define	get_tls(r)\n"
@@ -199,7 +210,7 @@ mkzasm(char *dir, char *file)
 	fatal("unknown $GOOS/$GOARCH in mkzasm");
 ok:
 
-	// Run 6c -D GOOS_goos -D GOARCH_goarch -I workdir -a proc.c
+	// Run 6c -D GOOS_goos -D GOARCH_goarch -I workdir -a -n -o workdir/proc.acid proc.c
 	// to get acid [sic] output.
 	vreset(&argv);
 	vadd(&argv, bpathf(&b, "%s/%sc", tooldir, gochar));
@@ -210,8 +221,12 @@ ok:
 	vadd(&argv, "-I");
 	vadd(&argv, bprintf(&b, "%s", workdir));
 	vadd(&argv, "-a");
+	vadd(&argv, "-n");
+	vadd(&argv, "-o");
+	vadd(&argv, bpathf(&b, "%s/proc.acid", workdir));
 	vadd(&argv, "proc.c");
-	runv(&in, dir, CheckExit, &argv);
+	runv(nil, dir, CheckExit, &argv);
+	readfile(&in, bpathf(&b, "%s/proc.acid", workdir));
 	
 	// Convert input like
 	//	aggr G
@@ -282,11 +297,12 @@ mkzruntimedefs(char *dir, char *file)
 {
 	int i, skip;
 	char *p;
-	Buf in, b, out;
+	Buf in, b, b1, out;
 	Vec argv, lines, fields, seen;
 	
 	binit(&in);
 	binit(&b);
+	binit(&b1);
 	binit(&out);
 	vinit(&argv);
 	vinit(&lines);
@@ -302,7 +318,7 @@ mkzruntimedefs(char *dir, char *file)
 	);
 
 	
-	// Run 6c -D GOOS_goos -D GOARCH_goarch -I workdir -q
+	// Run 6c -D GOOS_goos -D GOARCH_goarch -I workdir -q -n -o workdir/runtimedefs
 	// on each of the runtimedefs C files.
 	vadd(&argv, bpathf(&b, "%s/%sc", tooldir, gochar));
 	vadd(&argv, "-D");
@@ -312,11 +328,15 @@ mkzruntimedefs(char *dir, char *file)
 	vadd(&argv, "-I");
 	vadd(&argv, bprintf(&b, "%s", workdir));
 	vadd(&argv, "-q");
+	vadd(&argv, "-n");
+	vadd(&argv, "-o");
+	vadd(&argv, bpathf(&b, "%s/runtimedefs", workdir));
 	vadd(&argv, "");
 	p = argv.p[argv.len-1];
 	for(i=0; i<nelem(runtimedefs); i++) {
 		argv.p[argv.len-1] = runtimedefs[i];
-		runv(&b, dir, CheckExit, &argv);
+		runv(nil, dir, CheckExit, &argv);
+		readfile(&b, bpathf(&b1, "%s/runtimedefs", workdir));
 		bwriteb(&in, &b);
 	}
 	argv.p[argv.len-1] = p;
@@ -358,6 +378,7 @@ mkzruntimedefs(char *dir, char *file)
 
 	bfree(&in);
 	bfree(&b);
+	bfree(&b1);
 	bfree(&out);
 	vfree(&argv);
 	vfree(&lines);

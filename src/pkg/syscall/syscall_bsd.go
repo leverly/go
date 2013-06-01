@@ -20,6 +20,7 @@ import (
 /*
  * Pseudo-system calls
  */
+
 // The const provides a compile-time constant so clients
 // can adjust to whether there is a working Getwd and avoid
 // even linking this function into the binary.  See ../os/getwd.go.
@@ -326,6 +327,11 @@ func Getsockname(fd int) (sa Sockaddr, err error) {
 	if err = getsockname(fd, &rsa, &len); err != nil {
 		return
 	}
+	// TODO(jsing): Remove after OpenBSD 5.4 is released (see issue 3349).
+	if runtime.GOOS == "openbsd" && rsa.Addr.Family == AF_UNSPEC && rsa.Addr.Len == 0 {
+		rsa.Addr.Family = AF_UNIX
+		rsa.Addr.Len = SizeofSockaddrUnix
+	}
 	return anyToSockaddr(&rsa)
 }
 
@@ -450,7 +456,9 @@ func Recvfrom(fd int, p []byte, flags int) (n int, from Sockaddr, err error) {
 	if n, err = recvfrom(fd, p, flags, &rsa, &len); err != nil {
 		return
 	}
-	from, err = anyToSockaddr(&rsa)
+	if rsa.Addr.Family != AF_UNSPEC {
+		from, err = anyToSockaddr(&rsa)
+	}
 	return
 }
 

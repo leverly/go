@@ -299,6 +299,50 @@ func goDirPackages(longdir string) ([][]string, error) {
 	return pkgs, nil
 }
 
+// shouldTest looks for build tags in a source file and returns
+// whether the file should be used according to the tags.
+func shouldTest(src string, goos, goarch string) (ok bool, whyNot string) {
+	if idx := strings.Index(src, "\npackage"); idx >= 0 {
+		src = src[:idx]
+	}
+	notgoos := "!" + goos
+	notgoarch := "!" + goarch
+	for _, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "//") {
+			line = line[2:]
+		} else {
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if len(line) == 0 || line[0] != '+' {
+			continue
+		}
+		words := strings.Fields(line)
+		if words[0] == "+build" {
+			for _, word := range words {
+				switch word {
+				case goos, goarch:
+					return true, ""
+				case notgoos, notgoarch:
+					continue
+				default:
+					if word[0] == '!' {
+						// NOT something-else
+						return true, ""
+					}
+				}
+			}
+			// no matching tag found.
+			return false, line
+		}
+	}
+	// no build tags.
+	return true, ""
+}
+
+func init() { checkShouldTest() }
+
 // run runs a test.
 func (t *test) run() {
 	defer close(t.donec)
@@ -318,7 +362,18 @@ func (t *test) run() {
 		t.err = errors.New("double newline not found")
 		return
 	}
+	if ok, why := shouldTest(t.src, runtime.GOOS, runtime.GOARCH); !ok {
+		t.action = "skip"
+		if *showSkips {
+			fmt.Printf("%-20s %-20s: %s\n", t.action, t.goFileName(), why)
+		}
+		return
+	}
 	action := t.src[:pos]
+	if nl := strings.Index(action, "\n"); nl >= 0 && strings.Contains(action[:nl], "+build") {
+		// skip first line
+		action = action[nl+1:]
+	}
 	if strings.HasPrefix(action, "//") {
 		action = action[2:]
 	}
@@ -378,6 +433,7 @@ func (t *test) run() {
 		cmd.Stderr = &buf
 		if useTmp {
 			cmd.Dir = t.tempDir
+			cmd.Env = envForDir(cmd.Dir)
 		}
 		err := cmd.Run()
 		if err != nil {
@@ -628,6 +684,7 @@ func (t *test) errorCheck(outStr string, fullshort ...string) (err error) {
 			continue
 		}
 		matched := false
+		n := len(out)
 		for _, errmsg := range errmsgs {
 			if we.re.MatchString(errmsg) {
 				matched = true
@@ -636,7 +693,7 @@ func (t *test) errorCheck(outStr string, fullshort ...string) (err error) {
 			}
 		}
 		if !matched {
-			errs = append(errs, fmt.Errorf("%s:%d: no match for %q in%s", we.file, we.lineNum, we.reStr, strings.Join(out, "\n")))
+			errs = append(errs, fmt.Errorf("%s:%d: no match for %#q in:\n\t%s", we.file, we.lineNum, we.reStr, strings.Join(out[n:], "\n\t")))
 			continue
 		}
 	}
@@ -703,7 +760,7 @@ func (t *test) wantedErrors(file, short string) (errs []wantedError) {
 		all := m[1]
 		mm := errQuotesRx.FindAllStringSubmatch(all, -1)
 		if mm == nil {
-			log.Fatalf("invalid errchk line in %s: %s", t.goFileName(), line)
+			log.Fatalf("%s:%d: invalid errchk line: %s", t.goFileName(), lineNum, line)
 		}
 		for _, m := range mm {
 			rx := lineRx.ReplaceAllStringFunc(m[1], func(m string) string {
@@ -717,10 +774,14 @@ func (t *test) wantedErrors(file, short string) (errs []wantedError) {
 				}
 				return fmt.Sprintf("%s:%d", short, n)
 			})
-			filterPattern := fmt.Sprintf(`^(\w+/)?%s:%d[:[]`, short, lineNum)
+			re, err := regexp.Compile(rx)
+			if err != nil {
+				log.Fatalf("%s:%d: invalid regexp in ERROR line: %v", t.goFileName(), lineNum, err)
+			}
+			filterPattern := fmt.Sprintf(`^(\w+/)?%s:%d[:[]`, regexp.QuoteMeta(short), lineNum)
 			errs = append(errs, wantedError{
 				reStr:    rx,
-				re:       regexp.MustCompile(rx),
+				re:       re,
 				filterRe: regexp.MustCompile(filterPattern),
 				lineNum:  lineNum,
 				file:     short,
@@ -732,17 +793,14 @@ func (t *test) wantedErrors(file, short string) (errs []wantedError) {
 }
 
 var skipOkay = map[string]bool{
-	"linkx.go":               true,
-	"sigchld.go":             true,
-	"sinit.go":               true,
-	"fixedbugs/bug248.go":    true, // combines errorcheckdir and rundir in the same dir.
-	"fixedbugs/bug302.go":    true, // tests both .$O and .a imports.
-	"fixedbugs/bug345.go":    true, // needs the appropriate flags in gc invocation.
-	"fixedbugs/bug369.go":    true, // needs compiler flags.
-	"fixedbugs/bug385_32.go": true, // arch-specific errors.
-	"fixedbugs/bug385_64.go": true, // arch-specific errors.
-	"fixedbugs/bug429.go":    true,
-	"bugs/bug395.go":         true,
+	"linkx.go":            true, // like "run" but wants linker flags
+	"sinit.go":            true,
+	"fixedbugs/bug248.go": true, // combines errorcheckdir and rundir in the same dir.
+	"fixedbugs/bug302.go": true, // tests both .$O and .a imports.
+	"fixedbugs/bug345.go": true, // needs the appropriate flags in gc invocation.
+	"fixedbugs/bug369.go": true, // needs compiler flags.
+	"fixedbugs/bug429.go": true, // like "run" but program should fail
+	"bugs/bug395.go":      true,
 }
 
 // defaultRunOutputLimit returns the number of runoutput tests that
@@ -755,4 +813,36 @@ func defaultRunOutputLimit() int {
 		cpu = maxArmCPU
 	}
 	return cpu
+}
+
+// checkShouldTest runs canity checks on the shouldTest function.
+func checkShouldTest() {
+	assert := func(ok bool, _ string) {
+		if !ok {
+			panic("fail")
+		}
+	}
+	assertNot := func(ok bool, _ string) { assert(!ok, "") }
+	assert(shouldTest("// +build linux", "linux", "arm"))
+	assert(shouldTest("// +build !windows", "linux", "arm"))
+	assertNot(shouldTest("// +build !windows", "windows", "amd64"))
+	assertNot(shouldTest("// +build arm 386", "linux", "amd64"))
+	assert(shouldTest("// This is a test.", "os", "arch"))
+}
+
+// envForDir returns a copy of the environment
+// suitable for running in the given directory.
+// The environment is the current process's environment
+// but with an updated $PWD, so that an os.Getwd in the
+// child will be faster.
+func envForDir(dir string) []string {
+	env := os.Environ()
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PWD=") {
+			env[i] = "PWD=" + dir
+			return env
+		}
+	}
+	env = append(env, "PWD="+dir)
+	return env
 }

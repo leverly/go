@@ -183,11 +183,18 @@ func forkAndExecInChild(argv0 *byte, argv []*byte, envv []envItem, dir *byte, at
 		errbuf   [ERRMAX]byte
 	)
 
-	// guard against side effects of shuffling fds below.
+	// Guard against side effects of shuffling fds below.
+	// Make sure that nextfd is beyond any currently open files so
+	// that we can't run the risk of overwriting any of them.
 	fd := make([]int, len(attr.Files))
+	nextfd = len(attr.Files)
 	for i, ufd := range attr.Files {
+		if nextfd < int(ufd) {
+			nextfd = int(ufd)
+		}
 		fd[i] = int(ufd)
 	}
+	nextfd++
 
 	if envv != nil {
 		clearenv = RFCENVG
@@ -251,7 +258,6 @@ func forkAndExecInChild(argv0 *byte, argv []*byte, envv []envItem, dir *byte, at
 
 	// Pass 1: look for fd[i] < i and move those up above len(fd)
 	// so that pass 2 won't stomp on an fd it needs later.
-	nextfd = int(len(fd))
 	if pipe < nextfd {
 		r1, _, _ = RawSyscall(SYS_DUP, uintptr(pipe), uintptr(nextfd), 0)
 		if int32(r1) == -1 {
@@ -495,11 +501,6 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 	return pid, nil
 }
 
-// Combination of fork and exec, careful to be thread safe.
-func ForkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) {
-	return forkExec(argv0, argv, attr)
-}
-
 type waitErr struct {
 	Waitmsg
 	err error
@@ -551,12 +552,19 @@ func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, err err
 		forkc <- ret
 
 		var w waitErr
-		w.err = Await(&w.Waitmsg)
+		for w.err == nil && w.Pid != ret.pid {
+			w.err = Await(&w.Waitmsg)
+		}
 		waitc <- &w
 		close(waitc)
 	}()
 	ret := <-forkc
 	return ret.pid, ret.err
+}
+
+// Combination of fork and exec, careful to be thread safe.
+func ForkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) {
+	return startProcess(argv0, argv, attr)
 }
 
 // StartProcess wraps ForkExec for package os.
@@ -612,8 +620,8 @@ func Exec(argv0 string, argv []string, envv []string) (err error) {
 // WaitProcess waits until the pid of a
 // running process is found in the queue of
 // wait messages. It is used in conjunction
-// with StartProcess to wait for a running
-// process to exit.
+// with ForkExec/StartProcess to wait for a
+// running process to exit.
 func WaitProcess(pid int, w *Waitmsg) (err error) {
 	procs.Lock()
 	ch := procs.waits[pid]

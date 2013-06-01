@@ -38,6 +38,7 @@ enum
 	thechar = '5',
 	PtrSize = 4,
 	IntSize = 4,
+	MaxAlign = 8,	// max data alignment
 	FuncAlign = 4  // single-instruction alignment
 };
 
@@ -68,21 +69,24 @@ struct	Adr
 {
 	union
 	{
-		int32	u0offset;
+		struct {
+			int32	u0offset;
+			int32	u0offset2; // argsize
+		} u0off;
 		char*	u0sval;
 		Ieee	u0ieee;
 		char*	u0sbig;
 	} u0;
 	Sym*	sym;
 	Sym*	gotype;
-	int32	offset2; // argsize
 	char	type;
 	char	reg;
 	char	name;
 	char	class;
 };
 
-#define	offset	u0.u0offset
+#define	offset	u0.u0off.u0offset
+#define	offset2	u0.u0off.u0offset2
 #define	sval	u0.u0sval
 #define	scon	sval
 #define	ieee	u0.u0ieee
@@ -92,9 +96,12 @@ struct	Reloc
 {
 	int32	off;
 	uchar	siz;
+	uchar	done;
 	int16	type;
 	int32	add;
+	int32	xadd;
 	Sym*	sym;
+	Sym*	xsym;
 };
 
 struct	Prog
@@ -108,6 +115,7 @@ struct	Prog
 	} u0;
 	Prog*	cond;
 	Prog*	link;
+	Prog*	pcrel;
 	int32	pc;
 	int32	line;
 	int32	spadj;
@@ -129,11 +137,12 @@ struct	Prog
 struct	Sym
 {
 	char*	name;
+	char*	extname;	// name used in external object files
 	short	type;
 	short	version;
 	uchar	dupok;
 	uchar	reachable;
-	uchar	dynexport;
+	uchar	cgoexport;
 	uchar	leaf;
 	int32	dynid;
 	int32	plt;
@@ -143,6 +152,8 @@ struct	Sym
 	int32	size;
 	int32	align;	// if non-zero, required alignment in bytes
 	int32	elfsym;
+	int32	locals;	// size of stack frame locals area
+	int32	args;	// size of stack frame incoming arguments area
 	uchar	special;
 	uchar	fnptr;	// used as fn ptr
 	uchar	stkcheck;
@@ -156,7 +167,6 @@ struct	Sym
 	Sym*	reachparent;
 	Sym*	queue;
 	char*	file;
-	char*	dynimpname;
 	char*	dynimplib;
 	char*	dynimpvers;
 	struct Section*	sect;
@@ -172,6 +182,7 @@ struct	Sym
 	Reloc*	r;
 	int32	nr;
 	int32	maxr;
+	int 	rel_ro;
 };
 
 #define SIGNINTERN	(1729*325*1729)
@@ -194,6 +205,7 @@ struct	Optab
 	char	size;
 	char	param;
 	char	flag;
+	uchar	pcrelsiz;
 };
 struct	Oprang
 {
@@ -211,6 +223,7 @@ enum
 	LFROM		= 1<<0,
 	LTO		= 1<<1,
 	LPOOL		= 1<<2,
+	LPCREL		= 1<<3,
 
 	C_NONE		= 0,
 	C_REG,
@@ -225,6 +238,7 @@ enum
 	C_NCON,		/* ~RCON */
 	C_SCON,		/* 0xffff */
 	C_LCON,
+	C_LCONADDR,
 	C_ZFCON,
 	C_SFCON,
 	C_LFCON,
@@ -278,13 +292,13 @@ EXTERN	int32	INITDAT;		/* data location */
 EXTERN	int32	INITRND;		/* data round above text location */
 EXTERN	int32	INITTEXT;		/* text location */
 EXTERN	char*	INITENTRY;		/* entry point */
+EXTERN	char*	LIBINITENTRY;		/* shared library entry point */
 EXTERN	int32	autosize;
 EXTERN	Auto*	curauto;
 EXTERN	Auto*	curhist;
 EXTERN	Prog*	curp;
 EXTERN	Sym*	cursym;
 EXTERN	Sym*	datap;
-EXTERN	int32 	elfdatsize;
 EXTERN	int	debug[128];
 EXTERN	Sym*	etextp;
 EXTERN	char*	noname;
@@ -310,6 +324,8 @@ EXTERN	int	dtype;
 EXTERN	int	tlsoffset;
 EXTERN	int	armsize;
 EXTERN	int	goarm;
+EXTERN	Sym*	adrgotype;	// type symbol on last Adr read
+EXTERN	Sym*	fromgotype;	// type symbol on last p->from read
 
 extern	char*	anames[];
 extern	Optab	optab[];

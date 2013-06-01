@@ -801,7 +801,8 @@ maplit(int ctxt, Node *n, Node *var, NodeList **init)
 {
 	Node *r, *a;
 	NodeList *l;
-	int nerr, b;
+	int nerr;
+	int64 b;
 	Type *t, *tk, *tv, *t1;
 	Node *vstat, *index, *value;
 	Sym *syma, *symb;
@@ -953,7 +954,7 @@ void
 anylit(int ctxt, Node *n, Node *var, NodeList **init)
 {
 	Type *t;
-	Node *a, *vstat;
+	Node *a, *vstat, *r;
 
 	t = n->type;
 	switch(n->op) {
@@ -964,7 +965,14 @@ anylit(int ctxt, Node *n, Node *var, NodeList **init)
 		if(!isptr[t->etype])
 			fatal("anylit: not ptr");
 
-		a = nod(OAS, var, callnew(t->type));
+		r = nod(ONEW, N, N);
+		r->typecheck = 1;
+		r->type = t;
+		r->esc = n->esc;
+		walkexpr(&r, init);
+
+		a = nod(OAS, var, r);
+
 		typecheck(&a, Etop);
 		*init = list(*init, a);
 
@@ -1135,7 +1143,10 @@ stataddr(Node *nam, Node *n)
 		l = getlit(n->right);
 		if(l < 0)
 			break;
-		nam->xoffset += l*n->type->width;
+		// Check for overflow.
+		if(n->type->width != 0 && MAXWIDTH/n->type->width <= l)
+			break;
+ 		nam->xoffset += l*n->type->width;
 		nam->type = n->type;
 		return 1;
 	}

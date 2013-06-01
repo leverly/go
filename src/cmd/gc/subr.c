@@ -151,14 +151,23 @@ yyerror(char *fmt, ...)
 		if(lastsyntax == lexlineno)
 			return;
 		lastsyntax = lexlineno;
-		
-		if(strstr(fmt, "{ or {")) {
+			
+		if(strstr(fmt, "{ or {") || strstr(fmt, " or ?") || strstr(fmt, " or @")) {
 			// The grammar has { and LBRACE but both show up as {.
 			// Rewrite syntax error referring to "{ or {" to say just "{".
 			strecpy(buf, buf+sizeof buf, fmt);
 			p = strstr(buf, "{ or {");
 			if(p)
 				memmove(p+1, p+6, strlen(p+6)+1);
+			
+			// The grammar has ? and @ but only for reading imports.
+			// Silence them in ordinary errors.
+			p = strstr(buf, " or ?");
+			if(p)
+				memmove(p, p+5, strlen(p+5)+1);
+			p = strstr(buf, " or @");
+			if(p)
+				memmove(p, p+5, strlen(p+5)+1);
 			fmt = buf;
 		}
 		
@@ -504,6 +513,18 @@ nod(int op, Node *nleft, Node *nright)
 	return n;
 }
 
+void
+saveorignode(Node *n)
+{
+	Node *norig;
+
+	if(n->orig != N)
+		return;
+	norig = nod(n->op, N, N);
+	*norig = *n;
+	n->orig = norig;
+}
+
 // ispaddedfield returns whether the given field
 // is followed by padding. For the case where t is
 // the last field, total gives the size of the enclosing struct.
@@ -527,6 +548,12 @@ algtype1(Type *t, Type **bad)
 		*bad = T;
 
 	switch(t->etype) {
+	case TANY:
+	case TFORW:
+		// will be defined later.
+		*bad = t;
+		return -1;
+
 	case TINT8:
 	case TUINT8:
 	case TINT16:
@@ -644,11 +671,14 @@ Type*
 maptype(Type *key, Type *val)
 {
 	Type *t;
+	Type *bad;
+	int atype;
 
 	if(key != nil) {
-		switch(key->etype) {
+		atype = algtype1(key, &bad);
+		switch(bad == T ? key->etype : bad->etype) {
 		default:
-			if(algtype1(key, nil) == ANOEQ)
+			if(atype == ANOEQ)
 				yyerror("invalid map key type %T", key);
 			break;
 		case TANY:
@@ -693,6 +723,12 @@ methcmp(const void *va, const void *vb)
 	
 	a = *(Type**)va;
 	b = *(Type**)vb;
+	if(a->sym == S && b->sym == S)
+		return 0;
+	if(a->sym == S)
+		return -1;
+	if(b->sym == S)
+		return 1;
 	i = strcmp(a->sym->name, b->sym->name);
 	if(i != 0)
 		return i;
@@ -803,7 +839,7 @@ Type*
 aindex(Node *b, Type *t)
 {
 	Type *r;
-	int bound;
+	int64 bound;
 
 	bound = -1;	// open bound
 	typecheck(&b, Erv);
@@ -840,6 +876,7 @@ treecopy(Node *n)
 	default:
 		m = nod(OXXX, N, N);
 		*m = *n;
+		m->orig = m;
 		m->left = treecopy(n->left);
 		m->right = treecopy(n->right);
 		m->list = listtreecopy(n->list);
@@ -1371,7 +1408,7 @@ assignconv(Node *n, Type *t, char *context)
 	Node *r, *old;
 	char *why;
 	
-	if(n == N || n->type == T)
+	if(n == N || n->type == T || n->type->broke)
 		return n;
 
 	old = n;
@@ -1406,7 +1443,7 @@ assignconv(Node *n, Type *t, char *context)
 	r->type = t;
 	r->typecheck = 1;
 	r->implicit = 1;
-	r->orig = n;
+	r->orig = n->orig;
 	return r;
 }
 
@@ -1737,6 +1774,13 @@ ullmancalc(Node *n)
 	case OCALLINTER:
 		ul = UINF;
 		goto out;
+	case OANDAND:
+	case OOROR:
+		// hard with race detector
+		if(flag_race) {
+			ul = UINF;
+			goto out;
+		}
 	}
 	ul = 1;
 	if(n->left != N)
@@ -1750,6 +1794,8 @@ ullmancalc(Node *n)
 		ul = ur;
 
 out:
+	if(ul > 200)
+		ul = 200; // clamp to uchar with room to grow
 	n->ullman = ul;
 }
 
@@ -2074,7 +2120,7 @@ localexpr(Node *n, Type *t, NodeList **init)
 void
 setmaxarg(Type *t)
 {
-	int32 w;
+	int64 w;
 
 	dowidth(t);
 	w = t->argwid;
@@ -2543,6 +2589,7 @@ genwrapper(Type *rcvr, Type *method, Sym *newnam, int iface)
 		fn->dupok = 1;
 	typecheck(&fn, Etop);
 	typechecklist(fn->nbody, Etop);
+	inlcalls(fn);
 	curfn = nil;
 	funccompile(fn, 0);
 }
@@ -3251,11 +3298,14 @@ liststmt(NodeList *l)
 int
 count(NodeList *l)
 {
-	int n;
+	vlong n;
 
 	n = 0;
 	for(; l; l=l->next)
 		n++;
+	if((int)n != n) { // Overflow.
+		yyerror("too many elements in list");
+	}
 	return n;
 }
 
@@ -3545,10 +3595,8 @@ umagic(Magic *m)
 Sym*
 ngotype(Node *n)
 {
-	if(n->sym != S && n->realtype != T)
-	if(strncmp(n->sym->name, "autotmp_", 8) != 0)
-		return typenamesym(n->realtype);
-
+	if(n->type != T)
+		return typenamesym(n->type);
 	return S;
 }
 
@@ -3701,4 +3749,18 @@ isbadimport(Strlit *path)
 		}
 	}
 	return 0;
+}
+
+void
+checknotnil(Node *x, NodeList **init)
+{
+	Node *n;
+	
+	if(isinter(x->type)) {
+		x = nod(OITAB, x, N);
+		typecheck(&x, Erv);
+	}
+	n = nod(OCHECKNOTNIL, x, N);
+	n->typecheck = 1;
+	*init = list(*init, n);
 }

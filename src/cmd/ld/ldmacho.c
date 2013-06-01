@@ -593,13 +593,6 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 			} else
 				s->type = SDATA;
 		}
-		if(s->type == STEXT) {
-			if(etextp)
-				etextp->next = s;
-			else
-				textp = s;
-			etextp = s;
-		}
 		sect->sym = s;
 	}
 	
@@ -631,6 +624,12 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 			werrstr("reference to invalid section %s/%s", sect->segname, sect->name);
 			continue;
 		}
+		if(s->outer != S) {
+			if(s->dupok)
+				continue;
+			diag("%s: duplicate symbol reference: %s in both %s and %s", pn, s->name, s->outer->name, sect->sym->name);
+			errorexit();
+		}
 		s->type = outer->type | SSUB;
 		s->sub = outer->sub;
 		outer->sub = s;
@@ -640,10 +639,8 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 			s->size = (sym+1)->value - sym->value;
 		else
 			s->size = sect->addr + sect->size - sym->value;
-		if(!s->dynexport) {
+		if(!(s->cgoexport & CgoExportDynamic))
 			s->dynimplib = nil;	// satisfy dynimport
-			s->dynimpname = nil;	// satisfy dynimport
-		}
 		if(outer->type == STEXT) {
 			Prog *p;
 
@@ -661,11 +658,29 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 			p->link = nil;
 			p->pc = pc++;
 			s->text = p;
-
-			etextp->next = s;
-			etextp = s;
 		}
 		sym->sym = s;
+	}
+
+	// Sort outer lists by address, adding to textp.
+	// This keeps textp in increasing address order.
+	for(i=0; i<c->seg.nsect; i++) {
+		sect = &c->seg.sect[i];
+		if((s = sect->sym) == S)
+			continue;
+		if(s->sub)
+			s->sub = listsort(s->sub, valuecmp, offsetof(Sym, sub));
+		if(s->type == STEXT) {
+			if(etextp)
+				etextp->next = s;
+			else
+				textp = s;
+			etextp = s;
+			for(s = s->sub; s != S; s = s->sub) {
+				etextp->next = s;
+				etextp = s;
+			}
+		}
 	}
 
 	// load relocations
@@ -789,9 +804,9 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 				//
 				// [For future reference, see Darwin's /usr/include/mach-o/x86_64/reloc.h]
 				secaddr = c->seg.sect[rel->symnum-1].addr;
-				rp->add = e->e32(s->p+rp->off) + rp->off + 4 - secaddr;
+				rp->add = (int32)e->e32(s->p+rp->off) + rp->off + 4 - secaddr;
 			} else
-				rp->add = e->e32(s->p+rp->off);
+				rp->add = (int32)e->e32(s->p+rp->off);
 
 			// For i386 Mach-O PC-relative, the addend is written such that
 			// it *is* the PC being subtracted.  Use that to make
