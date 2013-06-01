@@ -66,71 +66,16 @@ func cname(s string) string {
 	return s
 }
 
-// ParseFlags extracts #cgo CFLAGS and LDFLAGS options from the file
-// preamble. Multiple occurrences are concatenated with a separating space,
-// even across files.
-func (p *Package) ParseFlags(f *File, srcfile string) {
+// DiscardCgoDirectives processes the import C preamble, and discards
+// all #cgo CFLAGS and LDFLAGS directives, so they don't make their
+// way into _cgo_export.h.
+func (f *File) DiscardCgoDirectives() {
 	linesIn := strings.Split(f.Preamble, "\n")
 	linesOut := make([]string, 0, len(linesIn))
-
-NextLine:
 	for _, line := range linesIn {
 		l := strings.TrimSpace(line)
 		if len(l) < 5 || l[:4] != "#cgo" || !unicode.IsSpace(rune(l[4])) {
 			linesOut = append(linesOut, line)
-			continue
-		}
-
-		l = strings.TrimSpace(l[4:])
-		fields := strings.SplitN(l, ":", 2)
-		if len(fields) != 2 {
-			fatalf("%s: bad #cgo line: %s", srcfile, line)
-		}
-
-		var k string
-		kf := strings.Fields(fields[0])
-		switch len(kf) {
-		case 1:
-			k = kf[0]
-		case 2:
-			k = kf[1]
-			switch kf[0] {
-			case goos:
-			case goarch:
-			case goos + "/" + goarch:
-			default:
-				continue NextLine
-			}
-		default:
-			fatalf("%s: bad #cgo option: %s", srcfile, fields[0])
-		}
-
-		args, err := splitQuoted(fields[1])
-		if err != nil {
-			fatalf("%s: bad #cgo option %s: %s", srcfile, k, err)
-		}
-		for _, arg := range args {
-			if !safeName(arg) {
-				fatalf("%s: #cgo option %s is unsafe: %s", srcfile, k, arg)
-			}
-		}
-
-		switch k {
-
-		case "CFLAGS", "LDFLAGS":
-			p.addToFlag(k, args)
-
-		case "pkg-config":
-			cflags, ldflags, err := pkgConfig(args)
-			if err != nil {
-				fatalf("%s: bad #cgo option %s: %s", srcfile, k, err)
-			}
-			p.addToFlag("CFLAGS", cflags)
-			p.addToFlag("LDFLAGS", ldflags)
-
-		default:
-			fatalf("%s: unsupported #cgo option %s", srcfile, k)
-
 		}
 	}
 	f.Preamble = strings.Join(linesOut, "\n")
@@ -139,45 +84,11 @@ NextLine:
 // addToFlag appends args to flag.  All flags are later written out onto the
 // _cgo_flags file for the build system to use.
 func (p *Package) addToFlag(flag string, args []string) {
-	if oldv, ok := p.CgoFlags[flag]; ok {
-		p.CgoFlags[flag] = oldv + " " + strings.Join(args, " ")
-	} else {
-		p.CgoFlags[flag] = strings.Join(args, " ")
-	}
+	p.CgoFlags[flag] = append(p.CgoFlags[flag], args...)
 	if flag == "CFLAGS" {
 		// We'll also need these when preprocessing for dwarf information.
 		p.GccOptions = append(p.GccOptions, args...)
 	}
-}
-
-// pkgConfig runs pkg-config and extracts --libs and --cflags information
-// for packages.
-func pkgConfig(packages []string) (cflags, ldflags []string, err error) {
-	for _, name := range packages {
-		if len(name) == 0 || name[0] == '-' {
-			return nil, nil, errors.New(fmt.Sprintf("invalid name: %q", name))
-		}
-	}
-
-	args := append([]string{"pkg-config", "--cflags"}, packages...)
-	stdout, stderr, ok := run(nil, args)
-	if !ok {
-		os.Stderr.Write(stderr)
-		return nil, nil, errors.New("pkg-config failed")
-	}
-	cflags, err = splitQuoted(string(stdout))
-	if err != nil {
-		return
-	}
-
-	args = append([]string{"pkg-config", "--libs"}, packages...)
-	stdout, stderr, ok = run(nil, args)
-	if !ok {
-		os.Stderr.Write(stderr)
-		return nil, nil, errors.New("pkg-config failed")
-	}
-	ldflags, err = splitQuoted(string(stdout))
-	return
 }
 
 // splitQuoted splits the string s around each instance of one or more consecutive
@@ -391,9 +302,9 @@ func (p *Package) guessKinds(f *File) []*Name {
 	b.WriteString(builtinProlog)
 	b.WriteString(f.Preamble)
 	b.WriteString("void __cgo__f__(void) {\n")
-	b.WriteString("#line 0 \"cgo-test\"\n")
+	b.WriteString("#line 1 \"cgo-test\"\n")
 	for i, n := range toSniff {
-		fmt.Fprintf(&b, "%s; enum { _cgo_enum_%d = %s }; /* cgo-test:%d */\n", n.C, i, n.C, i)
+		fmt.Fprintf(&b, "%s; /* #%d */\nenum { _cgo_enum_%d = %s }; /* #%d */\n", n.C, i, i, n.C, i)
 	}
 	b.WriteString("}\n")
 	stderr := p.gccErrors(b.Bytes())
@@ -423,14 +334,18 @@ func (p *Package) guessKinds(f *File) []*Name {
 		if err != nil {
 			continue
 		}
+		i = (i - 1) / 2
 		what := ""
 		switch {
 		default:
 			continue
-		case strings.Contains(line, ": useless type name in empty declaration"):
+		case strings.Contains(line, ": useless type name in empty declaration"),
+			strings.Contains(line, ": declaration does not declare anything"),
+			strings.Contains(line, ": unexpected type name"):
 			what = "type"
 			isConst[i] = false
-		case strings.Contains(line, ": statement with no effect"):
+		case strings.Contains(line, ": statement with no effect"),
+			strings.Contains(line, ": expression result unused"):
 			what = "not-type" // const or func or var
 		case strings.Contains(line, "undeclared"):
 			error_(token.NoPos, "%s", strings.TrimSpace(line[colon+1:]))
@@ -731,14 +646,19 @@ func (p *Package) rewriteRef(f *File) {
 	}
 }
 
-// gccName returns the name of the compiler to run.  Use $GCC if set in
+// gccName returns the name of the compiler to run.  Use $CC if set in
 // the environment, otherwise just "gcc".
 
-func (p *Package) gccName() (ret string) {
-	if ret = os.Getenv("GCC"); ret == "" {
-		ret = "gcc"
+func (p *Package) gccName() string {
+	// Use $CC if set, since that's what the build uses.
+	if ret := os.Getenv("CC"); ret != "" {
+		return ret
 	}
-	return
+	// Fall back to $GCC if set, since that's what we used to use.
+	if ret := os.Getenv("GCC"); ret != "" {
+		return ret
+	}
+	return "gcc"
 }
 
 // gccMachine returns the gcc -m flag to use, either "-m32", "-m64" or "-marm".
@@ -771,6 +691,19 @@ func (p *Package) gccCmd() []string {
 		"-c",  // do not link
 		"-xc", // input language is C
 	}
+	if strings.Contains(p.gccName(), "clang") {
+		c = append(c,
+			"-ferror-limit=0",
+			// Apple clang version 1.7 (tags/Apple/clang-77) (based on LLVM 2.9svn)
+			// doesn't have -Wno-unneeded-internal-declaration, so we need yet another
+			// flag to disable the warning. Yes, really good diagnostics, clang.
+			"-Wno-unknown-warning-option",
+			"-Wno-unneeded-internal-declaration",
+			"-Wno-unused-function",
+			"-Qunused-arguments",
+		)
+	}
+
 	c = append(c, p.GccOptions...)
 	c = append(c, p.gccMachine()...)
 	c = append(c, "-") //read input from standard input
@@ -876,6 +809,15 @@ func (p *Package) gccDefines(stdin []byte) string {
 func (p *Package) gccErrors(stdin []byte) string {
 	// TODO(rsc): require failure
 	args := p.gccCmd()
+
+	// GCC 4.8.0 has a bug: it sometimes does not apply
+	// -Wunused-value to values that are macros defined in system
+	// headers.  See issue 5118.  Adding -Wsystem-headers avoids
+	// that problem.  This will produce additional errors, but it
+	// doesn't matter because we will ignore all errors that are
+	// not marked for the cgo-test file.
+	args = append(args, "-Wsystem-headers")
+
 	if *debugGcc {
 		fmt.Fprintf(os.Stderr, "$ %s <<EOF\n", strings.Join(args, " "))
 		os.Stderr.Write(stdin)
@@ -1031,6 +973,12 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 			fatalf("%s: type conversion loop at %s", lineno(pos), dtype)
 		}
 		return t
+	}
+
+	// clang won't generate DW_AT_byte_size for pointer types,
+	// so we have to fix it here.
+	if dt, ok := base(dtype).(*dwarf.PtrType); ok && dt.ByteSize == -1 {
+		dt.ByteSize = c.ptrSize
 	}
 
 	t := new(Type)
@@ -1542,8 +1490,8 @@ func godefsFields(fld []*ast.Field) {
 	npad := 0
 	for _, f := range fld {
 		for _, n := range f.Names {
-			if strings.HasPrefix(n.Name, prefix) && n.Name != prefix {
-				n.Name = n.Name[len(prefix):]
+			if n.Name != prefix {
+				n.Name = strings.TrimPrefix(n.Name, prefix)
 			}
 			if n.Name == "_" {
 				// Use exported name instead.

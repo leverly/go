@@ -191,15 +191,16 @@ gjmp(Prog *to)
 }
 
 void
-ggloblnod(Node *nam, int32 width)
+ggloblnod(Node *nam)
 {
 	Prog *p;
 
 	p = gins(AGLOBL, nam, N);
 	p->lineno = nam->lineno;
+	p->from.gotype = ngotype(nam);
 	p->to.sym = S;
 	p->to.type = D_CONST;
-	p->to.offset = width;
+	p->to.offset = nam->type->width;
 	if(nam->readonly)
 		p->from.scale = RODATA;
 	if(nam->type != T && !haspointers(nam->type))
@@ -255,11 +256,12 @@ isfat(Type *t)
  * call afunclit to fix up the argument.
  */
 void
-afunclit(Addr *a)
+afunclit(Addr *a, Node *n)
 {
 	if(a->type == D_ADDR && a->index == D_EXTERN) {
 		a->type = D_EXTERN;
 		a->index = D_NONE;
+		a->sym = n->sym;
 	}
 }
 
@@ -1148,6 +1150,7 @@ ismem(Node *n)
 	case OINDREG:
 	case ONAME:
 	case OPARAM:
+	case OCLOSUREVAR:
 		return 1;
 	}
 	return 0;
@@ -1168,9 +1171,9 @@ split64(Node *n, Node *lo, Node *hi)
 	if(!is64(n->type))
 		fatal("split64 %T", n->type);
 
-	sclean[nsclean].op = OEMPTY;
 	if(nsclean >= nelem(sclean))
 		fatal("split64 clean");
+	sclean[nsclean].op = OEMPTY;
 	nsclean++;
 	switch(n->op) {
 	default:
@@ -2158,11 +2161,11 @@ gins(int as, Node *f, Node *t)
 // Generate an instruction referencing *n
 // to force segv on nil pointer dereference.
 void
-checkref(Node *n)
+checkref(Node *n, int force)
 {
 	Node m;
 
-	if(n->type->type->width < unmappedzero)
+	if(!force && isptr[n->type->etype] && n->type->type->width < unmappedzero)
 		return;
 
 	regalloc(&m, types[TUINTPTR], n);
@@ -2234,6 +2237,17 @@ naddr(Node *n, Addr *a, int canemitcode)
 		a->node = n->left->orig;
 		break;
 
+	case OCLOSUREVAR:
+		a->type = D_DX+D_INDIR;
+		a->offset = n->xoffset;
+		a->sym = S;
+		break;
+
+	case OCFUNC:
+		naddr(n->left, a, canemitcode);
+		a->sym = n->left->sym;
+		break;
+
 	case ONAME:
 		a->etype = 0;
 		a->width = 0;
@@ -2241,7 +2255,6 @@ naddr(Node *n, Addr *a, int canemitcode)
 			a->etype = simtype[n->type->etype];
 			dowidth(n->type);
 			a->width = n->type->width;
-			a->gotype = ngotype(n);
 		}
 		a->offset = n->xoffset;
 		a->sym = n->sym;
@@ -2273,6 +2286,7 @@ naddr(Node *n, Addr *a, int canemitcode)
 		case PFUNC:
 			a->index = D_EXTERN;
 			a->type = D_ADDR;
+			a->sym = funcsym(a->sym);
 			break;
 		}
 		break;
@@ -2377,7 +2391,8 @@ naddr(Node *n, Addr *a, int canemitcode)
 int
 dotaddable(Node *n, Node *n1)
 {
-	int o, oary[10];
+	int o;
+	int64 oary[10];
 	Node *nn;
 
 	if(n->op != ODOT)

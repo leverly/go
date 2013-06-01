@@ -132,6 +132,8 @@ peep(void)
 		case AGLOBL:
 		case ANAME:
 		case ASIGNAME:
+		case ALOCALS:
+		case ATYPE:
 			p = p->link;
 		}
 	}
@@ -470,6 +472,7 @@ elimshortmov(Reg *r)
 {
 	Prog *p;
 
+	USED(r);
 	for(r=firstr; r!=R; r=r->link) {
 		p = r->prog;
 		if(regtyp(&p->to)) {
@@ -553,7 +556,7 @@ elimshortmov(Reg *r)
 	}
 }
 
-int
+static int
 regconsttyp(Adr *a)
 {
 	if(regtyp(a))
@@ -756,7 +759,7 @@ subprop(Reg *r0)
 		}
 	}
 	if(debug['P'] && debug['v'])
-		print("\tran off end; return 0\n", p);
+		print("\tran off end; return 0\n");
 	return 0;
 
 gotit:
@@ -1168,6 +1171,8 @@ copyu(Prog *p, Adr *v, Adr *s)
 		if(REGEXT && v->type <= REGEXT && v->type > exregoffset)
 			return 2;
 		if(REGARG >= 0 && v->type == (uchar)REGARG)
+			return 2;
+		if(v->type == p->from.type)
 			return 2;
 
 		if(s != A) {

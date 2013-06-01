@@ -248,6 +248,8 @@ regopt(Prog *firstp)
 		case AGLOBL:
 		case ANAME:
 		case ASIGNAME:
+		case ALOCALS:
+		case ATYPE:
 			continue;
 		}
 		r = rega();
@@ -274,6 +276,10 @@ regopt(Prog *firstp)
 				r1->s1 = R;
 			}
 		}
+
+		// Avoid making variables for direct-called functions.
+		if(p->as == ABL && p->to.type == D_EXTERN)
+			continue;
 
 		/*
 		 * left side always read
@@ -1006,7 +1012,6 @@ mkvar(Reg *r, Adr *a)
 	v = var+i;
 	v->offset = o;
 	v->name = n;
-//	v->gotype = a->gotype;
 	v->etype = et;
 	v->width = w;
 	v->addr = flag;		// funny punning

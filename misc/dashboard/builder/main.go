@@ -6,16 +6,15 @@ package main
 
 import (
 	"bytes"
-	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -34,37 +33,37 @@ const (
 var extraEnv = []string{
 	"CC",
 	"GOARM",
-	"GOHOSTARCH",
-	"GOHOSTOS",
 	"PATH",
 	"TMPDIR",
+	"USER",
 }
 
 type Builder struct {
+	goroot       *Repo
 	name         string
 	goos, goarch string
 	key          string
 }
 
 var (
-	buildroot     = flag.String("buildroot", defaultBuildRoot(), "Directory under which to build")
-	commitFlag    = flag.Bool("commit", false, "upload information about new commits")
-	dashboard     = flag.String("dashboard", "build.golang.org", "Go Dashboard Host")
-	buildRelease  = flag.Bool("release", false, "Build and upload binary release archives")
-	buildRevision = flag.String("rev", "", "Build specified revision and exit")
-	buildCmd      = flag.String("cmd", filepath.Join(".", allCmd), "Build command (specify relative to go/src/)")
-	failAll       = flag.Bool("fail", false, "fail all builds")
-	parallel      = flag.Bool("parallel", false, "Build multiple targets in parallel")
-	buildTimeout  = flag.Duration("buildTimeout", 60*time.Minute, "Maximum time to wait for builds and tests")
-	cmdTimeout    = flag.Duration("cmdTimeout", 5*time.Minute, "Maximum time to wait for an external command")
-	verbose       = flag.Bool("v", false, "verbose")
+	buildroot      = flag.String("buildroot", defaultBuildRoot(), "Directory under which to build")
+	dashboard      = flag.String("dashboard", "build.golang.org", "Go Dashboard Host")
+	buildRelease   = flag.Bool("release", false, "Build and upload binary release archives")
+	buildRevision  = flag.String("rev", "", "Build specified revision and exit")
+	buildCmd       = flag.String("cmd", filepath.Join(".", allCmd), "Build command (specify relative to go/src/)")
+	failAll        = flag.Bool("fail", false, "fail all builds")
+	parallel       = flag.Bool("parallel", false, "Build multiple targets in parallel")
+	buildTimeout   = flag.Duration("buildTimeout", 60*time.Minute, "Maximum time to wait for builds and tests")
+	cmdTimeout     = flag.Duration("cmdTimeout", 5*time.Minute, "Maximum time to wait for an external command")
+	commitInterval = flag.Duration("commitInterval", 1*time.Minute, "Time to wait between polling for new commits (0 disables commit poller)")
+	verbose        = flag.Bool("v", false, "verbose")
 )
 
 var (
-	goroot      string
 	binaryTagRe = regexp.MustCompile(`^(release\.r|weekly\.)[0-9\-.]+`)
 	releaseRe   = regexp.MustCompile(`^release\.r[0-9\-.]+`)
 	allCmd      = "all" + suffix
+	raceCmd     = "race" + suffix
 	cleanCmd    = "clean" + suffix
 	suffix      = defaultSuffix()
 )
@@ -76,13 +75,34 @@ func main() {
 		os.Exit(2)
 	}
 	flag.Parse()
-	if len(flag.Args()) == 0 && !*commitFlag {
+	if len(flag.Args()) == 0 {
 		flag.Usage()
 	}
-	goroot = filepath.Join(*buildroot, "goroot")
+	goroot := &Repo{
+		Path: filepath.Join(*buildroot, "goroot"),
+	}
+
+	// set up work environment, use existing enviroment if possible
+	if goroot.Exists() || *failAll {
+		log.Print("Found old workspace, will use it")
+	} else {
+		if err := os.RemoveAll(*buildroot); err != nil {
+			log.Fatalf("Error removing build root (%s): %s", *buildroot, err)
+		}
+		if err := os.Mkdir(*buildroot, mkdirPerm); err != nil {
+			log.Fatalf("Error making build root (%s): %s", *buildroot, err)
+		}
+		var err error
+		goroot, err = RemoteRepo(hgUrl).Clone(goroot.Path, "tip")
+		if err != nil {
+			log.Fatal("Error cloning repository:", err)
+		}
+	}
+
+	// set up builders
 	builders := make([]*Builder, len(flag.Args()))
-	for i, builder := range flag.Args() {
-		b, err := NewBuilder(builder)
+	for i, name := range flag.Args() {
+		b, err := NewBuilder(goroot, name)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -94,32 +114,9 @@ func main() {
 		return
 	}
 
-	// set up work environment, use existing enviroment if possible
-	if hgRepoExists(goroot) {
-		log.Print("Found old workspace, will use it")
-	} else {
-		if err := os.RemoveAll(*buildroot); err != nil {
-			log.Fatalf("Error removing build root (%s): %s", *buildroot, err)
-		}
-		if err := os.Mkdir(*buildroot, mkdirPerm); err != nil {
-			log.Fatalf("Error making build root (%s): %s", *buildroot, err)
-		}
-		if err := hgClone(hgUrl, goroot); err != nil {
-			log.Fatal("Error cloning repository:", err)
-		}
-	}
-
-	if *commitFlag {
-		if len(flag.Args()) == 0 {
-			commitWatcher()
-			return
-		}
-		go commitWatcher()
-	}
-
 	// if specified, build revision and return
 	if *buildRevision != "" {
-		hash, err := fullHash(goroot, *buildRevision)
+		hash, err := goroot.FullHash(*buildRevision)
 		if err != nil {
 			log.Fatal("Error finding revision: ", err)
 		}
@@ -131,7 +128,10 @@ func main() {
 		return
 	}
 
-	// go continuous build mode (default)
+	// Start commit watcher
+	go commitWatcher(goroot)
+
+	// go continuous build mode
 	// check for new commits and build them
 	for {
 		built := false
@@ -178,15 +178,18 @@ func failMode(builders []*Builder) {
 	}
 }
 
-func NewBuilder(builder string) (*Builder, error) {
-	b := &Builder{name: builder}
+func NewBuilder(goroot *Repo, name string) (*Builder, error) {
+	b := &Builder{
+		goroot: goroot,
+		name:   name,
+	}
 
 	// get goos/goarch from builder string
-	s := strings.SplitN(builder, "-", 3)
+	s := strings.SplitN(b.name, "-", 3)
 	if len(s) >= 2 {
 		b.goos, b.goarch = s[0], s[1]
 	} else {
-		return nil, fmt.Errorf("unsupported builder form: %s", builder)
+		return nil, fmt.Errorf("unsupported builder form: %s", name)
 	}
 
 	// read keys from keyfile
@@ -208,6 +211,16 @@ func NewBuilder(builder string) (*Builder, error) {
 	return b, nil
 }
 
+// buildCmd returns the build command to invoke.
+// Builders which contain the string '-race' in their
+// name will override *buildCmd and return raceCmd.
+func (b *Builder) buildCmd() string {
+	if strings.Contains(b.name, "-race") {
+		return raceCmd
+	}
+	return *buildCmd
+}
+
 // build checks for a new commit for this builder
 // and builds it if one is found.
 // It returns true if a build was attempted.
@@ -220,16 +233,8 @@ func (b *Builder) build() bool {
 	if hash == "" {
 		return false
 	}
-	// Look for hash locally before running hg pull.
-	if _, err := fullHash(goroot, hash[:12]); err != nil {
-		// Don't have hash, so run hg pull.
-		if err := run(*cmdTimeout, nil, goroot, hgCmd("pull")...); err != nil {
-			log.Println("hg pull failed:", err)
-			return false
-		}
-	}
-	err = b.buildHash(hash)
-	if err != nil {
+
+	if err := b.buildHash(hash); err != nil {
 		log.Println(err)
 	}
 	return true
@@ -245,34 +250,49 @@ func (b *Builder) buildHash(hash string) error {
 	}
 	defer os.RemoveAll(workpath)
 
-	// clone repo
-	if err := run(*cmdTimeout, nil, workpath, hgCmd("clone", goroot, "go")...); err != nil {
+	// pull before cloning to ensure we have the revision
+	if err := b.goroot.Pull(); err != nil {
 		return err
 	}
 
-	// update to specified revision
-	if err := run(*cmdTimeout, nil, filepath.Join(workpath, "go"), hgCmd("update", hash)...); err != nil {
+	// clone repo at specified revision
+	if _, err := b.goroot.Clone(filepath.Join(workpath, "go"), hash); err != nil {
 		return err
 	}
 
 	srcDir := filepath.Join(workpath, "go", "src")
 
 	// build
+	var buildlog bytes.Buffer
 	logfile := filepath.Join(workpath, "build.log")
-	cmd := *buildCmd
+	f, err := os.Create(logfile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := io.MultiWriter(f, &buildlog)
+
+	cmd := b.buildCmd()
 	if !filepath.IsAbs(cmd) {
 		cmd = filepath.Join(srcDir, cmd)
 	}
 	startTime := time.Now()
-	buildLog, status, err := runLog(*buildTimeout, b.envv(), logfile, srcDir, cmd)
+	ok, err := runOutput(*buildTimeout, b.envv(), w, srcDir, cmd)
 	runTime := time.Now().Sub(startTime)
-	if err != nil {
-		return fmt.Errorf("%s: %s", *buildCmd, err)
+	errf := func() string {
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		if !ok {
+			return "failed"
+		}
+		return "success"
 	}
+	fmt.Fprintf(w, "Build complete, duration %v. Result: %v\n", runTime, errf())
 
-	if status != 0 {
+	if err != nil || !ok {
 		// record failure
-		return b.recordResult(false, "", hash, "", buildLog, runTime)
+		return b.recordResult(false, "", hash, "", buildlog.String(), runTime)
 	}
 
 	// record success
@@ -358,24 +378,24 @@ func (b *Builder) buildSubrepo(goRoot, goPath, pkg, hash string) (string, error)
 	}
 
 	// fetch package and dependencies
-	log, status, err := runLog(*cmdTimeout, env, "", goPath, goTool, "get", "-d", pkg+"/...")
-	if err == nil && status != 0 {
-		err = fmt.Errorf("go exited with status %d", status)
+	log, ok, err := runLog(*cmdTimeout, env, goPath, goTool, "get", "-d", pkg+"/...")
+	if err == nil && !ok {
+		err = fmt.Errorf("go exited with status 1")
 	}
 	if err != nil {
 		return log, err
 	}
 
 	// hg update to the specified hash
-	pkgPath := filepath.Join(goPath, "src", pkg)
-	if err := run(*cmdTimeout, nil, pkgPath, hgCmd("update", hash)...); err != nil {
+	repo := Repo{Path: filepath.Join(goPath, "src", pkg)}
+	if err := repo.UpdateTo(hash); err != nil {
 		return "", err
 	}
 
 	// test the package
-	log, status, err = runLog(*buildTimeout, env, "", goPath, goTool, "test", "-short", pkg+"/...")
-	if err == nil && status != 0 {
-		err = fmt.Errorf("go exited with status %d", status)
+	log, ok, err = runLog(*buildTimeout, env, goPath, goTool, "test", "-short", pkg+"/...")
+	if err == nil && !ok {
+		err = fmt.Errorf("go exited with status 1")
 	}
 	return log, err
 }
@@ -387,7 +407,9 @@ func (b *Builder) envv() []string {
 	}
 	e := []string{
 		"GOOS=" + b.goos,
+		"GOHOSTOS=" + b.goos,
 		"GOARCH=" + b.goarch,
+		"GOHOSTARCH=" + b.goarch,
 		"GOROOT_FINAL=/usr/local/go",
 	}
 	for _, k := range extraEnv {
@@ -402,7 +424,9 @@ func (b *Builder) envv() []string {
 func (b *Builder) envvWindows() []string {
 	start := map[string]string{
 		"GOOS":         b.goos,
+		"GOHOSTOS":     b.goos,
 		"GOARCH":       b.goarch,
+		"GOHOSTARCH":   b.goarch,
 		"GOROOT_FINAL": `c:\go`,
 		"GOBUILDEXIT":  "1", // exit all.bat with completion status.
 	}
@@ -448,9 +472,13 @@ func isFile(name string) bool {
 }
 
 // commitWatcher polls hg for new commits and tells the dashboard about them.
-func commitWatcher() {
+func commitWatcher(goroot *Repo) {
+	if *commitInterval == 0 {
+		log.Printf("commitInterval is %s, disabling commitWatcher", *commitInterval)
+		return
+	}
 	// Create builder just to get master key.
-	b, err := NewBuilder("mercurial-commit")
+	b, err := NewBuilder(goroot, "mercurial-commit")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -461,103 +489,45 @@ func commitWatcher() {
 			log.Printf("poll...")
 		}
 		// Main Go repository.
-		commitPoll(key, "")
+		commitPoll(goroot, "", key)
 		// Go sub-repositories.
 		for _, pkg := range dashboardPackages("subrepo") {
-			commitPoll(key, pkg)
+			pkgroot := &Repo{
+				Path: filepath.Join(*buildroot, pkg),
+			}
+			commitPoll(pkgroot, pkg, key)
 		}
 		if *verbose {
 			log.Printf("sleep...")
 		}
-		time.Sleep(60e9)
+		time.Sleep(*commitInterval)
 	}
-}
-
-func hgClone(url, path string) error {
-	return run(*cmdTimeout, nil, *buildroot, hgCmd("clone", url, path)...)
-}
-
-func hgRepoExists(path string) bool {
-	fi, err := os.Stat(filepath.Join(path, ".hg"))
-	if err != nil {
-		return false
-	}
-	return fi.IsDir()
-}
-
-// HgLog represents a single Mercurial revision.
-type HgLog struct {
-	Hash   string
-	Author string
-	Date   string
-	Desc   string
-	Parent string
-
-	// Internal metadata
-	added bool
 }
 
 // logByHash is a cache of all Mercurial revisions we know about,
 // indexed by full hash.
 var logByHash = map[string]*HgLog{}
 
-// xmlLogTemplate is a template to pass to Mercurial to make
-// hg log print the log in valid XML for parsing with xml.Unmarshal.
-const xmlLogTemplate = `
-	<Log>
-	<Hash>{node|escape}</Hash>
-	<Parent>{parent|escape}</Parent>
-	<Author>{author|escape}</Author>
-	<Date>{date|rfc3339date}</Date>
-	<Desc>{desc|escape}</Desc>
-	</Log>
-`
-
 // commitPoll pulls any new revisions from the hg server
 // and tells the server about them.
-func commitPoll(key, pkg string) {
-	pkgRoot := goroot
-
-	if pkg != "" {
-		pkgRoot = filepath.Join(*buildroot, pkg)
-		if !hgRepoExists(pkgRoot) {
-			if err := hgClone(repoURL(pkg), pkgRoot); err != nil {
-				log.Printf("%s: hg clone failed: %v", pkg, err)
-				if err := os.RemoveAll(pkgRoot); err != nil {
-					log.Printf("%s: %v", pkg, err)
-				}
-				return
+func commitPoll(repo *Repo, pkg, key string) {
+	if !repo.Exists() {
+		var err error
+		repo, err = RemoteRepo(repoURL(pkg)).Clone(repo.Path, "tip")
+		if err != nil {
+			log.Printf("%s: hg clone failed: %v", pkg, err)
+			if err := os.RemoveAll(repo.Path); err != nil {
+				log.Printf("%s: %v", pkg, err)
 			}
 		}
-	}
-
-	if err := run(*cmdTimeout, nil, pkgRoot, hgCmd("pull")...); err != nil {
-		log.Printf("hg pull: %v", err)
 		return
 	}
 
-	const N = 50 // how many revisions to grab
-
-	data, _, err := runLog(*cmdTimeout, nil, "", pkgRoot, hgCmd("log",
-		"--encoding=utf-8",
-		"--limit="+strconv.Itoa(N),
-		"--template="+xmlLogTemplate)...,
-	)
+	logs, err := repo.Log() // repo.Log calls repo.Pull internally
 	if err != nil {
 		log.Printf("hg log: %v", err)
 		return
 	}
-
-	var logStruct struct {
-		Log []HgLog
-	}
-	err = xml.Unmarshal([]byte("<Top>"+data+"</Top>"), &logStruct)
-	if err != nil {
-		log.Printf("unmarshal hg log: %v", err)
-		return
-	}
-
-	logs := logStruct.Log
 
 	// Pass 1.  Fill in parents and add new log entries to logsByHash.
 	// Empty parent means take parent from next log entry.
@@ -567,7 +537,7 @@ func commitPoll(key, pkg string) {
 		if l.Parent == "" && i+1 < len(logs) {
 			l.Parent = logs[i+1].Hash
 		} else if l.Parent != "" {
-			l.Parent, _ = fullHash(pkgRoot, l.Parent)
+			l.Parent, _ = repo.FullHash(l.Parent)
 		}
 		if *verbose {
 			log.Printf("hg log %s: %s < %s\n", pkg, l.Hash, l.Parent)
@@ -579,8 +549,7 @@ func commitPoll(key, pkg string) {
 		}
 	}
 
-	for i := range logs {
-		l := &logs[i]
+	for _, l := range logs {
 		addCommit(pkg, l.Hash, key)
 	}
 }
@@ -622,28 +591,6 @@ func addCommit(pkg, hash, key string) bool {
 		return false
 	}
 	return true
-}
-
-// fullHash returns the full hash for the given Mercurial revision.
-func fullHash(root, rev string) (string, error) {
-	s, _, err := runLog(*cmdTimeout, nil, "", root,
-		hgCmd("log",
-			"--encoding=utf-8",
-			"--rev="+rev,
-			"--limit=1",
-			"--template={node}")...,
-	)
-	if err != nil {
-		return "", nil
-	}
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("cannot find revision")
-	}
-	if len(s) != 40 {
-		return "", fmt.Errorf("hg returned invalid hash " + s)
-	}
-	return s, nil
 }
 
 var repoRe = regexp.MustCompile(`^code\.google\.com/p/([a-z0-9\-]+(\.[a-z0-9\-]+)?)(/[a-z0-9A-Z_.\-/]+)?$`)
@@ -692,8 +639,4 @@ func getenvOk(k string) (v string, ok bool) {
 		}
 	}
 	return "", false
-}
-
-func hgCmd(args ...string) []string {
-	return append([]string{"hg", "--config", "extensions.codereview=!"}, args...)
 }

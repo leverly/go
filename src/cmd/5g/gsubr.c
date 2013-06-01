@@ -192,15 +192,16 @@ gjmp(Prog *to)
 }
 
 void
-ggloblnod(Node *nam, int32 width)
+ggloblnod(Node *nam)
 {
 	Prog *p;
 
 	p = gins(AGLOBL, nam, N);
 	p->lineno = nam->lineno;
+	p->from.gotype = ngotype(nam);
 	p->to.sym = S;
 	p->to.type = D_CONST;
-	p->to.offset = width;
+	p->to.offset = nam->type->width;
 	if(nam->readonly)
 		p->reg = RODATA;
 	if(nam->type != T && !haspointers(nam->type))
@@ -257,10 +258,12 @@ isfat(Type *t)
  * also fix up direct register references to be D_OREG.
  */
 void
-afunclit(Addr *a)
+afunclit(Addr *a, Node *n)
 {
 	if(a->type == D_CONST && a->name == D_EXTERN || a->type == D_REG) {
 		a->type = D_OREG;
+		if(n->op == ONAME)
+			a->sym = n->sym;
 	}
 }
 
@@ -540,6 +543,7 @@ ismem(Node *n)
 	case OINDREG:
 	case ONAME:
 	case OPARAM:
+	case OCLOSUREVAR:
 		return 1;
 	}
 	return 0;
@@ -560,9 +564,9 @@ split64(Node *n, Node *lo, Node *hi)
 	if(!is64(n->type))
 		fatal("split64 %T", n->type);
 
-	sclean[nsclean].op = OEMPTY;
 	if(nsclean >= nelem(sclean))
 		fatal("split64 clean");
+	sclean[nsclean].op = OEMPTY;
 	nsclean++;
 	switch(n->op) {
 	default:
@@ -1160,11 +1164,11 @@ gregshift(int as, Node *lhs, int32 stype, Node *reg, Node *rhs)
 // Generate an instruction referencing *n
 // to force segv on nil pointer dereference.
 void
-checkref(Node *n)
+checkref(Node *n, int force)
 {
 	Node m1, m2;
 
-	if(n->type->type->width < unmappedzero)
+	if(!force && isptr[n->type->etype] && n->type->type->width < unmappedzero)
 		return;
 
 	regalloc(&m1, types[TUINTPTR], n);
@@ -1209,6 +1213,7 @@ naddr(Node *n, Addr *a, int canemitcode)
 	a->type = D_NONE;
 	a->name = D_NONE;
 	a->reg = NREG;
+	a->gotype = S;
 	a->node = N;
 	a->etype = 0;
 	if(n == N)
@@ -1275,6 +1280,18 @@ naddr(Node *n, Addr *a, int canemitcode)
 		a->name = D_PARAM;
 		a->node = n->left->orig;
 		break;
+	
+	case OCLOSUREVAR:
+		a->type = D_OREG;
+		a->reg = 7;
+		a->offset = n->xoffset;
+		a->sym = S;
+		break;		
+
+	case OCFUNC:
+		naddr(n->left, a, canemitcode);
+		a->sym = n->left->sym;
+		break;
 
 	case ONAME:
 		a->etype = 0;
@@ -1315,6 +1332,7 @@ naddr(Node *n, Addr *a, int canemitcode)
 		case PFUNC:
 			a->name = D_EXTERN;
 			a->type = D_CONST;
+			a->sym = funcsym(a->sym);
 			break;
 		}
 		break;
@@ -1767,7 +1785,8 @@ sudoclean(void)
 int
 dotaddable(Node *n, Node *n1)
 {
-	int o, oary[10];
+	int o;
+	int64 oary[10];
 	Node *nn;
 
 	if(n->op != ODOT)
@@ -1798,7 +1817,7 @@ int
 sudoaddable(int as, Node *n, Addr *a, int *w)
 {
 	int o, i;
-	int oary[10];
+	int64 oary[10];
 	int64 v;
 	Node n1, n2, n3, n4, *nn, *l, *r;
 	Node *reg, *reg1;

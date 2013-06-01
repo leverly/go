@@ -34,5 +34,10 @@ func TestPrintf(t *testing.T)              { testPrintf(t) }
 func Test4029(t *testing.T)                { test4029(t) }
 func TestBoolAlign(t *testing.T)           { testBoolAlign(t) }
 func Test3729(t *testing.T)                { test3729(t) }
+func Test3775(t *testing.T)                { test3775(t) }
+func TestCthread(t *testing.T)             { testCthread(t) }
+func TestCallbackCallers(t *testing.T)     { testCallbackCallers(t) }
+func Test5227(t *testing.T)                { test5227(t) }
+func TestCflags(t *testing.T)              { testCflags(t) }
 
 func BenchmarkCgoCall(b *testing.B) { benchCgoCall(b) }

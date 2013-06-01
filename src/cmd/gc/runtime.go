@@ -89,7 +89,13 @@ func equal(typ *byte, x1, x2 any) (ret bool)
 // *byte is really *runtime.Type
 func makemap(mapType *byte, hint int64) (hmap map[any]any)
 func mapaccess1(mapType *byte, hmap map[any]any, key any) (val any)
+func mapaccess1_fast32(mapType *byte, hmap map[any]any, key any) (val *any)
+func mapaccess1_fast64(mapType *byte, hmap map[any]any, key any) (val *any)
+func mapaccess1_faststr(mapType *byte, hmap map[any]any, key any) (val *any)
 func mapaccess2(mapType *byte, hmap map[any]any, key any) (val any, pres bool)
+func mapaccess2_fast32(mapType *byte, hmap map[any]any, key any) (val *any, pres bool)
+func mapaccess2_fast64(mapType *byte, hmap map[any]any, key any) (val *any, pres bool)
+func mapaccess2_faststr(mapType *byte, hmap map[any]any, key any) (val *any, pres bool)
 func mapassign1(mapType *byte, hmap map[any]any, key any, val any)
 func mapiterinit(mapType *byte, hmap map[any]any, hiter *any)
 func mapdelete(mapType *byte, hmap map[any]any, key any)
@@ -118,8 +124,6 @@ func block()
 
 func makeslice(typ *byte, nel int64, cap int64) (ary []any)
 func growslice(typ *byte, old []any, n int64) (ary []any)
-
-func closure() // has args, but compiler fills in
 
 func memequal(eq *bool, size uintptr, x, y *any)
 func memequal8(eq *bool, size uintptr, x, y *any)

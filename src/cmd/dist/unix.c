@@ -698,6 +698,19 @@ main(int argc, char **argv)
 	if(strcmp(gohostarch, "arm") == 0)
 		maxnbg = 1;
 
+	// The OS X 10.6 linker does not support external
+	// linking mode; see
+	// https://code.google.com/p/go/issues/detail?id=5130 .
+	// The mapping from the uname release field to the OS X
+	// version number is complicated, but basically 10 or under is
+	// OS X 10.6 or earlier.
+	if(strcmp(gohostos, "darwin") == 0) {
+		if(uname(&u) < 0)
+			fatal("uname: %s", strerror(errno));
+		if(u.release[1] == '.' || hasprefix(u.release, "10"))
+			goextlinkenabled = "0";
+	}
+
 	init();
 	xmain(argc, argv);
 	bfree(&b);
@@ -745,17 +758,24 @@ static void sigillhand(int);
 // xtryexecfunc tries to execute function f, if any illegal instruction
 // signal received in the course of executing that function, it will
 // return 0, otherwise it will return 1.
+// Some systems (notably NetBSD) will spin and spin when executing VFPv3
+// instructions on VFPv2 system (e.g. Raspberry Pi) without ever triggering
+// SIGILL, so we set a 1-second alarm to catch that case.
 int
 xtryexecfunc(void (*f)(void))
 {
 	int r;
 	r = 0;
 	signal(SIGILL, sigillhand);
+	signal(SIGALRM, sigillhand);
+	alarm(1);
 	if(sigsetjmp(sigill_jmpbuf, 1) == 0) {
 		f();
 		r = 1;
 	}
 	signal(SIGILL, SIG_DFL);
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
 	return r;
 }
 
@@ -770,7 +790,15 @@ sigillhand(int signum)
 static void
 __cpuid(int dst[4], int ax)
 {
-#if defined(__i386__) || defined(__x86_64__)
+#ifdef __i386__
+	// we need to avoid ebx on i386 (esp. when -fPIC).
+	asm volatile(
+		"mov %%ebx, %%edi\n\t"
+		"cpuid\n\t"
+		"xchgl %%ebx, %%edi"
+		: "=a" (dst[0]), "=D" (dst[1]), "=c" (dst[2]), "=d" (dst[3])
+		: "0" (ax));
+#elif defined(__x86_64__)
 	asm volatile("cpuid"
 		: "=a" (dst[0]), "=b" (dst[1]), "=c" (dst[2]), "=d" (dst[3])
 		: "0" (ax));

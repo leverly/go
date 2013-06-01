@@ -155,10 +155,10 @@ struct	Type
 	Type*	orig;		// original type (type literal or predefined type)
 	int		lineno;
 
-	// TFUNCT
-	uchar	thistuple;
-	uchar	outtuple;
-	uchar	intuple;
+	// TFUNC
+	int	thistuple;
+	int	outtuple;
+	int	intuple;
 	uchar	outnamed;
 
 	Type*	method;
@@ -252,8 +252,7 @@ struct	Node
 	uchar	embedded;	// ODCLFIELD embedded type
 	uchar	colas;		// OAS resulting from :=
 	uchar	diag;		// already printed error about this
-	uchar	esc;		// EscXXX
-	uchar	funcdepth;
+	uchar	noescape;	// func arguments do not escape
 	uchar	builtin;	// built-in name, like len or close
 	uchar	walkdef;
 	uchar	typecheck;
@@ -267,10 +266,12 @@ struct	Node
 	uchar	addrtaken;	// address taken, even if not moved to heap
 	uchar	dupok;	// duplicate definitions ok (for func)
 	schar	likely; // likeliness of if statement
+	uchar	hasbreak;	// has break statement
+	uint	esc;		// EscXXX
+	int	funcdepth;
 
 	// most nodes
 	Type*	type;
-	Type*	realtype;	// as determined by typecheck
 	Node*	orig;		// original form, for printing, and tracking copies of ONAMEs
 
 	// func
@@ -324,6 +325,7 @@ struct	Node
 	int32	ostk;
 	int32	iota;
 	uint32	walkgen;
+	int32	esclevel;
 };
 #define	N	((Node*)0)
 
@@ -367,6 +369,7 @@ struct	Sym
 	uchar	sym;		// huffman encoding in object file
 	Sym*	link;
 	int32	npkg;	// number of imported packages with this name
+	uint32	uniqgen;
 
 	// saved and restored by dcopy
 	Pkg*	pkg;
@@ -391,6 +394,7 @@ struct	Pkg
 	uchar	imported;	// export data of this package was parsed
 	char	exported;	// import line written in export data
 	char	direct;	// imported directly
+	char	safe;	// whether the package is marked as safe
 };
 
 typedef	struct	Iter	Iter;
@@ -449,6 +453,7 @@ enum
 	OCALLFUNC,	// f()
 	OCALLMETH,	// t.Method()
 	OCALLINTER,	// err.Error()
+	OCALLPART,	// t.Method (without ())
 	OCAP,	// cap
 	OCLOSE,	// close
 	OCLOSURE,	// f = func() { etc }
@@ -559,6 +564,9 @@ enum
 	OINLCALL,	// intermediary representation of an inlined call.
 	OEFACE,	// itable and data words of an empty-interface value.
 	OITAB,	// itable word of an interface value.
+	OCLOSUREVAR, // variable reference at beginning of closure function
+	OCFUNC,	// reference to c function pointer (not go func value)
+	OCHECKNOTNIL, // emit code to ensure pointer/interface not nil
 
 	// arch-specific registers
 	OREGISTER,	// a register, such as AX.
@@ -645,20 +653,21 @@ enum
 	Cboth = Crecv | Csend,
 };
 
+// declaration context
 enum
 {
 	Pxxx,
 
-	PEXTERN,	// declaration context
-	PAUTO,
-	PPARAM,
-	PPARAMOUT,
-	PPARAMREF,	// param passed by reference
-	PFUNC,
+	PEXTERN,	// global variable
+	PAUTO,		// local variables
+	PPARAM,		// input arguments
+	PPARAMOUT,	// output results
+	PPARAMREF,	// closure variable reference
+	PFUNC,		// global function
 
 	PDISCARD,	// discard during parse of duplicate import
 
-	PHEAP = 1<<7,
+	PHEAP = 1<<7,	// an extra bit to identify an escaped variable
 };
 
 enum
@@ -691,7 +700,6 @@ typedef	struct	Var	Var;
 struct	Var
 {
 	vlong	offset;
-	Sym*	gotype;
 	Node*	node;
 	int	width;
 	char	name;
@@ -904,6 +912,7 @@ EXTERN	NodeList*	externdcl;
 EXTERN	NodeList*	closures;
 EXTERN	NodeList*	exportlist;
 EXTERN	NodeList*	importlist;	// imported functions and methods with inlinable bodies
+EXTERN	NodeList*	funcsyms;
 EXTERN	int	dclcontext;		// PEXTERN/PAUTO
 EXTERN	int	incannedimport;
 EXTERN	int	statuniqgen;		// name generator for static temps
@@ -940,6 +949,8 @@ EXTERN	int	compiling_runtime;
 EXTERN	int	compiling_wrappers;
 EXTERN	int	pure_go;
 EXTERN	int	flag_race;
+EXTERN	int	flag_largemodel;
+EXTERN	int	noescape;
 
 EXTERN	int	nointerface;
 EXTERN	int	fieldtrack_enabled;
@@ -981,7 +992,8 @@ Node*	closurebody(NodeList *body);
 void	closurehdr(Node *ntype);
 void	typecheckclosure(Node *func, int top);
 Node*	walkclosure(Node *func, NodeList **init);
-void	walkcallclosure(Node *n, NodeList **init);
+void	typecheckpartialcall(Node*, Node*);
+Node*	walkpartialcall(Node*, NodeList**);
 
 /*
  *	const.c
@@ -995,6 +1007,7 @@ void	defaultlit(Node **np, Type *t);
 void	defaultlit2(Node **lp, Node **rp, int force);
 void	evconst(Node *n);
 int	isconst(Node *n, int ct);
+int	isgoconst(Node *n);
 Node*	nodcplxlit(Val r, Val i);
 Node*	nodlit(Val v);
 long	nonnegconst(Node *n);
@@ -1052,6 +1065,7 @@ Node*	typedcl0(Sym *s);
 Node*	typedcl1(Node *n, Node *t, int local);
 Node*	typenod(Type *t);
 NodeList*	variter(NodeList *vl, Node *t, NodeList *el);
+Sym*	funcsym(Sym*);
 
 /*
  *	esc.c
@@ -1089,7 +1103,7 @@ void	cgen_eface(Node* n, Node* res);
 void	cgen_slice(Node* n, Node* res);
 void	clearlabels(void);
 void	checklabels(void);
-int	dotoffset(Node *n, int *oary, Node **nn);
+int	dotoffset(Node *n, int64 *oary, Node **nn);
 void	gen(Node *n);
 void	genlist(NodeList *l);
 Node*	sysfunc(char *name);
@@ -1317,6 +1331,7 @@ Node*	safeexpr(Node *n, NodeList **init);
 void	saveerrors(void);
 Node*	cheapexpr(Node *n, NodeList **init);
 Node*	localexpr(Node *n, Type *t, NodeList **init);
+void	saveorignode(Node *n);
 int32	setlineno(Node *n);
 void	setmaxarg(Type *t);
 Type*	shallow(Type *t);
@@ -1354,6 +1369,7 @@ Node*	typecheck(Node **np, int top);
 void	typechecklist(NodeList *l, int top);
 Node*	typecheckdef(Node *n);
 void	copytype(Node *n, Type *t);
+void	checkreturn(Node*);
 void	queuemethod(Node *n);
 
 /*
@@ -1407,7 +1423,8 @@ EXTERN	Node*	nodfp;
 int	anyregalloc(void);
 void	betypeinit(void);
 void	bgen(Node *n, int true, int likely, Prog *to);
-void	checkref(Node*);
+void	checkref(Node *n, int force);
+void	checknotnil(Node*, NodeList**);
 void	cgen(Node*, Node*);
 void	cgen_asop(Node *n);
 void	cgen_call(Node *n, int proc);
@@ -1428,7 +1445,7 @@ void	gdata(Node*, Node*, int);
 void	gdatacomplex(Node*, Mpcplx*);
 void	gdatastring(Node*, Strlit*);
 void	genembedtramp(Type*, Type*, Sym*, int iface);
-void	ggloblnod(Node *nam, int32 width);
+void	ggloblnod(Node *nam);
 void	ggloblsym(Sym *s, int32 width, int dupok, int rodata);
 Prog*	gjmp(Prog*);
 void	gused(Node*);

@@ -23,6 +23,14 @@ func (e ErrorString) Error() string { return string(e) }
 // NewError converts s to an ErrorString, which satisfies the Error interface.
 func NewError(s string) error { return ErrorString(s) }
 
+func (e ErrorString) Temporary() bool {
+	return e == EINTR || e == EMFILE || e.Timeout()
+}
+
+func (e ErrorString) Timeout() bool {
+	return e == EBUSY || e == ETIMEDOUT
+}
+
 // A Note is a string describing a process note.
 // It implements the os.Signal interface.
 type Note string
@@ -37,9 +45,6 @@ var (
 	Stdin  = 0
 	Stdout = 1
 	Stderr = 2
-
-	EAFNOSUPPORT = NewError("address family not supported by protocol")
-	EISDIR       = NewError("file is a directory")
 )
 
 // For testing: clients can set this flag to force
@@ -312,29 +317,12 @@ func DecodeBintime(b []byte) (nsec int64, err error) {
 	return
 }
 
-func Gettimeofday(tv *Timeval) (err error) {
-	// TODO(paulzhol):
-	// avoid reopening a file descriptor for /dev/bintime on each call,
-	// use lower-level calls to avoid allocation.
-
-	var b [8]byte
-	var nsec int64
-
-	fd, e := Open("/dev/bintime", O_RDONLY)
+func Gettimeofday(tv *Timeval) error {
+	nsec, e := nanotime()
 	if e != nil {
 		return e
 	}
-	defer Close(fd)
-
-	if _, e = Pread(fd, b[:], 0); e != nil {
-		return e
-	}
-
-	if nsec, e = DecodeBintime(b[:]); e != nil {
-		return e
-	}
 	*tv = NsecToTimeval(nsec)
-
 	return e
 }
 

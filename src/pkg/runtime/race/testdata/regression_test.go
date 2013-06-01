@@ -15,10 +15,13 @@ type LogImpl struct {
 }
 
 func NewLog() (l LogImpl) {
+	c := make(chan bool)
 	go func() {
 		_ = l
+		c <- true
 	}()
 	l = LogImpl{}
+	<-c
 	return
 }
 
@@ -40,6 +43,18 @@ func InstrumentMapLen2() {
 func InstrumentMapLen3() {
 	m := make(map[int]*map[int]int)
 	_ = len(*m[0])
+}
+
+func TestRaceUnaddressableMapLen(t *testing.T) {
+	m := make(map[int]map[int]int)
+	ch := make(chan int, 1)
+	m[0] = make(map[int]int)
+	go func() {
+		_ = len(m[0])
+		ch <- 0
+	}()
+	m[0][0] = 1
+	<-ch
 }
 
 type Rect struct {
@@ -126,4 +141,22 @@ func divInSlice() {
 	v := make([]int64, 10)
 	i := 1
 	_ = v[(i*4)/3]
+}
+
+func TestNoRaceReturn(t *testing.T) {
+	c := make(chan int)
+	noRaceReturn(c)
+	<-c
+}
+
+// Return used to do an implicit a = a, causing a read/write race
+// with the goroutine. Compiler has an optimization to avoid that now.
+// See issue 4014.
+func noRaceReturn(c chan int) (a, b int) {
+	a = 42
+	go func() {
+		_ = a
+		c <- 1
+	}()
+	return a, 10
 }

@@ -93,7 +93,7 @@ void	cgen_dcl(Node*);
 int	needconvert(Type*, Type*);
 void	genconv(Type*, Type*);
 void	allocparams(void);
-void	checklabels();
+void	checklabels(void);
 void	ginscall(Node*, int);
 
 /*
@@ -148,7 +148,7 @@ int	isfat(Type*);
 void	sudoclean(void);
 int	sudoaddable(int, Node*, Addr*);
 int	dotaddable(Node*, Node*);
-void	afunclit(Addr*);
+void	afunclit(Addr*, Node*);
 void	split64(Node*, Node*, Node*);
 void	splitclean(void);
 void	nswap(Node*, Node*);

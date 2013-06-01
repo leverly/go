@@ -48,21 +48,22 @@ Header headers[] = {
    "noheader", Hnoheader,
    "risc", Hrisc,
    "plan9", Hplan9x32,
-   "netbsd", Hnetbsd,
    "ixp1200", Hixp1200,
    "ipaq", Hipaq,
    "linux", Hlinux,
    "freebsd", Hfreebsd,
+   "netbsd", Hnetbsd,
    0, 0
 };
 
 /*
  *	-Hrisc -T0x10005000 -R4		is aif for risc os
  *	-Hplan9 -T4128 -R4096		is plan9 format
- *	-Hnetbsd -T0xF0000020 -R4	is NetBSD format
  *	-Hixp1200			is IXP1200 (raw)
  *	-Hipaq -T0xC0008010 -R1024	is ipaq
  *	-Hlinux -Tx -Rx			is linux elf
+ *	-Hfreebsd			is freebsd elf
+ *	-Hnetbsd			is netbsd elf
  */
 
 void
@@ -80,6 +81,8 @@ main(int argc, char *argv[])
 	INITDAT = -1;
 	INITRND = -1;
 	INITENTRY = 0;
+	LIBINITENTRY = 0;
+	linkmode = LinkInternal; // TODO: LinkAuto once everything works.
 	nuxiinit();
 	
 	p = getgoarm();
@@ -111,23 +114,41 @@ main(int argc, char *argv[])
 	flagcount("a", "disassemble output", &debug['a']);
 	flagcount("c", "dump call graph", &debug['c']);
 	flagcount("d", "disable dynamic executable", &debug['d']);
+	flagstr("extld", "linker to run in external mode", &extld);
+	flagstr("extldflags", "flags for external linker", &extldflags);
 	flagcount("f", "ignore version mismatch", &debug['f']);
 	flagcount("g", "disable go package data checks", &debug['g']);
 	flagstr("k", "sym: set field tracking symbol", &tracksym);
+	flagfn1("linkmode", "mode: set link mode (internal, external, auto)", setlinkmode);
 	flagcount("n", "dump symbol table", &debug['n']);
 	flagstr("o", "outfile: set output file", &outfile);
 	flagcount("p", "insert profiling code", &debug['p']);
 	flagstr("r", "dir1:dir2:...: set ELF dynamic linker search path", &rpath);
 	flagcount("race", "enable race detector", &flag_race);
 	flagcount("s", "disable symbol table", &debug['s']);
+	flagstr("tmpdir", "leave temporary files in this directory", &tmpdir);
 	flagcount("u", "reject unsafe packages", &debug['u']);
 	flagcount("v", "print link trace", &debug['v']);
 	flagcount("w", "disable DWARF generation", &debug['w']);
+	flagcount("shared", "generate shared object", &flag_shared);
+	// TODO: link mode flag
 	
 	flagparse(&argc, &argv, usage);
 
 	if(argc != 1)
 		usage();
+
+	// getgoextlinkenabled is based on GO_EXTLINK_ENABLED when
+	// Go was built; see ../../make.bash.
+	if(linkmode == LinkAuto && strcmp(getgoextlinkenabled(), "0") == 0)
+		linkmode = LinkInternal;
+
+	if(linkmode == LinkExternal) {
+		diag("only -linkmode=internal is supported");
+		errorexit();
+	} else if(linkmode == LinkAuto) {
+		linkmode = LinkInternal;
+	}
 
 	libinit();
 
@@ -164,15 +185,6 @@ main(int argc, char *argv[])
 		if(INITRND == -1)
 			INITRND = 4096;
 		break;
-	case Hnetbsd:	/* boot for NetBSD */
-		HEADR = 32L;
-		if(INITTEXT == -1)
-			INITTEXT = 0xF0000020L;
-		if(INITDAT == -1)
-			INITDAT = 0;
-		if(INITRND == -1)
-			INITRND = 4096;
-		break;
 	case Hixp1200: /* boot for IXP1200 */
 		HEADR = 0L;
 		if(INITTEXT == -1)
@@ -193,6 +205,7 @@ main(int argc, char *argv[])
 		break;
 	case Hlinux:	/* arm elf */
 	case Hfreebsd:
+	case Hnetbsd:
 		debug['d'] = 0;	// with dynamic linking
 		tlsoffset = -8; // hardcoded number, first 4-byte word for g, and then 4-byte word for m
 		                // this number is known to ../../pkg/runtime/cgo/gcc_linux_arm.c
@@ -273,6 +286,7 @@ main(int argc, char *argv[])
 	reloc();
 	asmb();
 	undef();
+	hostlink();
 
 	if(debug['c'])
 		print("ARM size = %d\n", armsize);
@@ -285,8 +299,21 @@ main(int argc, char *argv[])
 	errorexit();
 }
 
+static Sym*
+zsym(char *pn, Biobuf *f, Sym *h[])
+{	
+	int o;
+	
+	o = BGETC(f);
+	if(o == 0)
+		return S;
+	if(o < 0 || o >= NSYM || h[o] == nil)
+		mangle(pn);
+	return h[o];
+}
+
 static void
-zaddr(Biobuf *f, Adr *a, Sym *h[])
+zaddr(char *pn, Biobuf *f, Adr *a, Sym *h[])
 {
 	int i, c;
 	int32 l;
@@ -303,6 +330,7 @@ zaddr(Biobuf *f, Adr *a, Sym *h[])
 	}
 	a->sym = h[c];
 	a->name = BGETC(f);
+	adrgotype = zsym(pn, f, h);
 
 	if((schar)a->reg < 0 || a->reg > NREG) {
 		print("register out of range %d\n", a->reg);
@@ -363,8 +391,11 @@ zaddr(Biobuf *f, Adr *a, Sym *h[])
 	if(s == S)
 		return;
 	i = a->name;
-	if(i != D_AUTO && i != D_PARAM)
+	if(i != D_AUTO && i != D_PARAM) {
+		if(s && adrgotype)
+			s->gotype = adrgotype;
 		return;
+	}
 
 	l = a->offset;
 	for(u=curauto; u; u=u->link)
@@ -372,6 +403,8 @@ zaddr(Biobuf *f, Adr *a, Sym *h[])
 		if(u->type == i) {
 			if(u->aoffset > l)
 				u->aoffset = l;
+			if(adrgotype)
+				u->gotype = adrgotype;
 			return;
 		}
 
@@ -381,6 +414,7 @@ zaddr(Biobuf *f, Adr *a, Sym *h[])
 	u->asym = s;
 	u->aoffset = l;
 	u->type = i;
+	u->gotype = adrgotype;
 }
 
 void
@@ -409,6 +443,7 @@ ldobj1(Biobuf *f, char *pkg, int64 len, char *pn)
 	ntext = 0;
 	eof = Boffset(f) + len;
 	src[0] = 0;
+	pn = estrdup(pn); // we keep it in Sym* references
 
 newloop:
 	memset(h, 0, sizeof(h));
@@ -489,8 +524,9 @@ loop:
 	p->reg = BGETC(f);
 	p->line = Bget4(f);
 
-	zaddr(f, &p->from, h);
-	zaddr(f, &p->to, h);
+	zaddr(pn, f, &p->from, h);
+	fromgotype = adrgotype;
+	zaddr(pn, f, &p->to, h);
 
 	if(p->as != ATEXT && p->as != AGLOBL && p->reg > NREG)
 		diag("register out of range %A %d", p->as, p->reg);
@@ -578,6 +614,19 @@ loop:
 		pc++;
 		break;
 
+	case ALOCALS:
+		if(skip)
+			goto casedef;
+		cursym->locals = p->to.offset;
+		pc++;
+		break;
+
+	case ATYPE:
+		if(skip)
+			goto casedef;
+		pc++;
+		goto loop;
+
 	case ATEXT:
 		if(cursym != nil && cursym->text) {
 			histtoauto();
@@ -607,6 +656,11 @@ loop:
 			etextp->next = s;
 		else
 			textp = s;
+		if(fromgotype) {
+			if(s->gotype && s->gotype != fromgotype)
+				diag("%s: type mismatch for %s", pn, s->name);
+			s->gotype = fromgotype;
+		}
 		etextp = s;
 		p->align = 4;
 		autosize = (p->to.offset+3L) & ~3L;
@@ -615,6 +669,7 @@ loop:
 		s->type = STEXT;
 		s->text = p;
 		s->value = pc;
+		s->args = p->to.offset2;
 		lastp = p;
 		p->pc = pc;
 		pc++;
