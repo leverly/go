@@ -25,6 +25,9 @@ void
 markautoused(Prog* p)
 {
 	for (; p; p = p->link) {
+		if (p->as == ATYPE)
+			continue;
+
 		if (p->from.type == D_AUTO && p->from.node)
 			p->from.node->used = 1;
 
@@ -35,14 +38,22 @@ markautoused(Prog* p)
 
 // Fixup instructions after compactframe has moved all autos around.
 void
-fixautoused(Prog* p)
+fixautoused(Prog *p)
 {
-	for (; p; p = p->link) {
+	Prog **lp;
+
+	for (lp=&p; (p=*lp) != P; ) {
+		if (p->as == ATYPE && p->from.node && p->from.type == D_AUTO && !p->from.node->used) {
+			*lp = p->link;
+			continue;
+		}
 		if (p->from.type == D_AUTO && p->from.node)
 			p->from.offset += p->from.node->stkdelta;
 
 		if (p->to.type == D_AUTO && p->to.node)
 			p->to.offset += p->to.node->stkdelta;
+
+		lp = &p->link;
 	}
 }
 
@@ -50,15 +61,18 @@ fixautoused(Prog* p)
 /*
  * generate:
  *	call f
+ *	proc=-1	normal call but no return
  *	proc=0	normal call
  *	proc=1	goroutine run in new proc
  *	proc=2	defer call save away stack
+  *	proc=3	normal call to C pointer (not Go func value)
  */
 void
 ginscall(Node *f, int proc)
 {
 	Prog *p;
 	Node reg, con;
+	Node r1;
 
 	switch(proc) {
 	default:
@@ -67,16 +81,37 @@ ginscall(Node *f, int proc)
 
 	case 0:	// normal call
 	case -1:	// normal call but no return
-		p = gins(ACALL, N, f);
-		afunclit(&p->to);
-		if(proc == -1 || noreturn(p))
-			gins(AUNDEF, N, N);
+		if(f->op == ONAME && f->class == PFUNC) {
+			p = gins(ACALL, N, f);
+			afunclit(&p->to, f);
+			if(proc == -1 || noreturn(p))
+				gins(AUNDEF, N, N);
+			break;
+		}
+		nodreg(&reg, types[tptr], D_DX);
+		nodreg(&r1, types[tptr], D_BX);
+		gmove(f, &reg);
+		reg.op = OINDREG;
+		gmove(&reg, &r1);
+		reg.op = OREGISTER;
+		gins(ACALL, &reg, &r1);
+		break;
+	
+	case 3:	// normal call of c function pointer
+		gins(ACALL, N, f);
 		break;
 
 	case 1:	// call in new proc (go)
 	case 2:	// deferred call (defer)
 		nodreg(&reg, types[TINT64], D_CX);
-		gins(APUSHQ, f, N);
+		if(flag_largemodel) {
+			regalloc(&r1, f->type, f);
+			gmove(f, &r1);
+			gins(APUSHQ, &r1, N);
+			regfree(&r1);
+		} else {
+			gins(APUSHQ, f, N);
+		}
 		nodconst(&con, types[TINT32], argsize(f->type));
 		gins(APUSHQ, &con, N);
 		if(proc == 1)
@@ -145,7 +180,14 @@ cgen_callinter(Node *n, Node *res, int proc)
 		fatal("cgen_callinter: badwidth");
 	nodo.op = OINDREG;
 	nodo.xoffset = n->left->xoffset + 3*widthptr + 8;
-	cgen(&nodo, &nodr);	// REG = 32+offset(REG) -- i.tab->fun[f]
+	if(proc == 0) {
+		// plain call: use direct c function pointer - more efficient
+		cgen(&nodo, &nodr);	// REG = 32+offset(REG) -- i.tab->fun[f]
+		proc = 3;
+	} else {
+		// go/defer. generate go func value.
+		gins(ALEAQ, &nodo, &nodr);	// REG = &(32+offset(REG)) -- i.tab->fun[f]
+	}
 
 	// BOTCH nodr.type = fntype;
 	nodr.type = n->left->type;
@@ -900,7 +942,7 @@ cgen_bmul(int op, Node *nl, Node *nr, Node *res)
 void
 clearfat(Node *nl)
 {
-	uint32 w, c, q;
+	int64 w, c, q;
 	Node n1, oldn1, ax, oldax;
 
 	/* clear a fat object */

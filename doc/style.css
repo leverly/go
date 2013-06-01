@@ -12,7 +12,7 @@ pre {
 	line-height: 18px;
 }
 pre .comment {
-	color: #375EAB;
+	color: #006600;
 }
 pre .highlight,
 pre .highlight-comment,
@@ -198,6 +198,9 @@ div#blog .read a {
 	border: 1px solid #375EAB;
 	background: #E0EBF5;
 }
+.download {
+	width: 150px;
+}
 
 div#menu {
 	float: right;
@@ -267,10 +270,12 @@ a#start {
 	border-radius: 5px;
 }
 a#start .big {
+	display: block;
 	font-weight: bold;
 	font-size: 20px;
 }
 a#start .desc {
+	display: block;
 	font-size: 14px;
 	font-weight: normal;
 	margin-top: 5px;

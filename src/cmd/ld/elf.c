@@ -55,7 +55,9 @@ elfinit(void)
 
 	// 32-bit architectures
 	case '5':
-		hdr.flags = 0x5000002; // has entry point, Version5 EABI
+		// we only use EABI on linux/arm
+		if(HEADTYPE == Hlinux)
+			hdr.flags = 0x5000002; // has entry point, Version5 EABI
 		// fallthrough
 	default:
 		hdr.phoff = ELF32HDRSIZE;	/* Must be be ELF32HDRSIZE: first PHdr must follow ELF header */
@@ -603,9 +605,7 @@ elfdynhash(void)
 		if(sy->dynimpvers)
 			need[sy->dynid] = addelflib(&needlib, sy->dynimplib, sy->dynimpvers);
 
-		name = sy->dynimpname;
-		if(name == nil)
-			name = sy->name;
+		name = sy->extname;
 		hc = elfhash((uchar*)name);
 
 		b = hc % nbucket;
@@ -758,12 +758,114 @@ elfshbits(Section *sect)
 		sh->flags |= SHF_EXECINSTR;
 	if(sect->rwx & 2)
 		sh->flags |= SHF_WRITE;
-	sh->addr = sect->vaddr;
-	sh->addralign = PtrSize;
+	if(strcmp(sect->name, ".tbss") == 0) {
+		sh->flags |= SHF_TLS;
+		sh->type = SHT_NOBITS;
+	}
+	if(linkmode != LinkExternal)
+		sh->addr = sect->vaddr;
+	sh->addralign = sect->align;
 	sh->size = sect->len;
 	sh->off = sect->seg->fileoff + sect->vaddr - sect->seg->vaddr;
 
 	return sh;
+}
+
+ElfShdr*
+elfshreloc(Section *sect)
+{
+	int typ;
+	ElfShdr *sh;
+	char *prefix;
+	char buf[100];
+	
+	// If main section is SHT_NOBITS, nothing to relocate.
+	// Also nothing to relocate in .shstrtab.
+	if(sect->vaddr >= sect->seg->vaddr + sect->seg->filelen)
+		return nil;
+	if(strcmp(sect->name, ".shstrtab") == 0 || strcmp(sect->name, ".tbss") == 0)
+		return nil;
+
+	if(thechar == '6') {
+		prefix = ".rela";
+		typ = SHT_RELA;
+	} else {
+		prefix = ".rel";
+		typ = SHT_REL;
+	}
+
+	snprint(buf, sizeof buf, "%s%s", prefix, sect->name);
+	sh = elfshname(buf);
+	sh->type = typ;
+	sh->entsize = PtrSize*(2+(typ==SHT_RELA));
+	sh->link = elfshname(".symtab")->shnum;
+	sh->info = sect->elfsect->shnum;
+	sh->off = sect->reloff;
+	sh->size = sect->rellen;
+	sh->addralign = PtrSize;
+	return sh;
+}
+
+void
+elfrelocsect(Section *sect, Sym *first)
+{
+	Sym *sym;
+	int32 eaddr;
+	Reloc *r;
+
+	// If main section is SHT_NOBITS, nothing to relocate.
+	// Also nothing to relocate in .shstrtab.
+	if(sect->vaddr >= sect->seg->vaddr + sect->seg->filelen)
+		return;
+	if(strcmp(sect->name, ".shstrtab") == 0)
+		return;
+
+	sect->reloff = cpos();
+	for(sym = first; sym != nil; sym = sym->next) {
+		if(!sym->reachable)
+			continue;
+		if(sym->value >= sect->vaddr)
+			break;
+	}
+	
+	eaddr = sect->vaddr + sect->len;
+	for(; sym != nil; sym = sym->next) {
+		if(!sym->reachable)
+			continue;
+		if(sym->value >= eaddr)
+			break;
+		cursym = sym;
+		
+		for(r = sym->r; r < sym->r+sym->nr; r++) {
+			if(r->done)
+				continue;
+			if(r->xsym == nil) {
+				diag("missing xsym in relocation");
+				continue;
+			}
+			if(r->xsym->elfsym == 0)
+				diag("reloc %d to non-elf symbol %s (outer=%s) %d", r->type, r->sym->name, r->xsym->name, r->sym->type);
+			if(elfreloc1(r, sym->value+r->off - sect->vaddr) < 0)
+				diag("unsupported obj reloc %d/%d to %s", r->type, r->siz, r->sym->name);
+		}
+	}
+		
+	sect->rellen = cpos() - sect->reloff;
+}	
+	
+void
+elfemitreloc(void)
+{
+	Section *sect;
+
+	while(cpos()&7)
+		cput(0);
+
+	elfrelocsect(segtext.sect, textp);
+	for(sect=segtext.sect->next; sect!=nil; sect=sect->next)
+		elfrelocsect(sect, datap);	
+	for(sect=segdata.sect; sect!=nil; sect=sect->next)
+		elfrelocsect(sect, datap);	
 }
 
 void
@@ -785,6 +887,8 @@ doelf(void)
 	addstring(shstrtab, ".data");
 	addstring(shstrtab, ".bss");
 	addstring(shstrtab, ".noptrbss");
+	if(linkmode == LinkExternal && HEADTYPE != Hopenbsd)
+		addstring(shstrtab, ".tbss");
 	if(HEADTYPE == Hnetbsd)
 		addstring(shstrtab, ".note.netbsd.ident");
 	if(HEADTYPE == Hopenbsd)
@@ -794,10 +898,41 @@ doelf(void)
 	addstring(shstrtab, ".elfdata");
 	addstring(shstrtab, ".rodata");
 	addstring(shstrtab, ".typelink");
+	if(flag_shared)
+		addstring(shstrtab, ".data.rel.ro");
 	addstring(shstrtab, ".gcdata");
 	addstring(shstrtab, ".gcbss");
 	addstring(shstrtab, ".gosymtab");
 	addstring(shstrtab, ".gopclntab");
+	
+	if(linkmode == LinkExternal) {
+		debug['s'] = 0;
+		debug['d'] = 1;
+
+		if(thechar == '6') {
+			addstring(shstrtab, ".rela.text");
+			addstring(shstrtab, ".rela.rodata");
+			addstring(shstrtab, ".rela.typelink");
+			addstring(shstrtab, ".rela.gcdata");
+			addstring(shstrtab, ".rela.gcbss");
+			addstring(shstrtab, ".rela.gosymtab");
+			addstring(shstrtab, ".rela.gopclntab");
+			addstring(shstrtab, ".rela.noptrdata");
+			addstring(shstrtab, ".rela.data");
+		} else {
+			addstring(shstrtab, ".rel.text");
+			addstring(shstrtab, ".rel.rodata");
+			addstring(shstrtab, ".rel.typelink");
+			addstring(shstrtab, ".rel.gcdata");
+			addstring(shstrtab, ".rel.gcbss");
+			addstring(shstrtab, ".rel.gosymtab");
+			addstring(shstrtab, ".rel.gopclntab");
+			addstring(shstrtab, ".rel.noptrdata");
+			addstring(shstrtab, ".rel.data");
+		}
+		// add a .note.GNU-stack section to mark the stack as non-executable
+		addstring(shstrtab, ".note.GNU-stack");
+	}
 
 	if(!debug['s']) {
 		addstring(shstrtab, ".symtab");
@@ -927,6 +1062,13 @@ doelf(void)
 		
 		elfwritedynent(s, DT_DEBUG, 0);
 
+		if(flag_shared) {
+			Sym *init_sym = lookup(LIBINITENTRY, 0);
+			if(init_sym->type != STEXT)
+				diag("entry not text: %s", init_sym->name);
+			elfwritedynentsym(s, DT_INIT, init_sym);
+		}
+
 		// Do not write DT_NULL.  elfdynhash will finish it.
 	}
 }
@@ -970,7 +1112,7 @@ asmbelfsetup(void)
 void
 asmbelf(vlong symo)
 {
-	int a, o;
+	vlong a, o;
 	vlong startva, resoff;
 	ElfEhdr *eh;
 	ElfPhdr *ph, *pph, *pnote;
@@ -995,6 +1137,14 @@ asmbelf(vlong symo)
 
 	startva = INITTEXT - HEADR;
 	resoff = ELFRESERVE;
+	
+	pph = nil;
+	if(linkmode == LinkExternal) {
+		/* skip program headers */
+		eh->phoff = 0;
+		eh->phentsize = 0;
+		goto elfobj;
+	}
 
 	/* program header info */
 	pph = newElfPhdr();
@@ -1147,6 +1297,7 @@ asmbelf(vlong symo)
 			sh->type = SHT_REL;
 			sh->flags = SHF_ALLOC;
 			sh->entsize = ELF32RELSIZE;
+			sh->link = elfshname(".dynsym")->shnum;
 			shsym(sh, lookup(".rel.plt", 0));
 
 			sh = elfshname(".rel");
@@ -1219,26 +1370,47 @@ asmbelf(vlong symo)
 		}
 	}
 
-	ph = newElfPhdr();
-	ph->type = PT_GNU_STACK;
-	ph->flags = PF_W+PF_R;
-	ph->align = PtrSize;
-	
-	ph = newElfPhdr();
-	ph->type = PT_PAX_FLAGS;
-	ph->flags = 0x2a00; // mprotect, randexec, emutramp disabled
-	ph->align = PtrSize;
+	if(HEADTYPE == Hlinux) {
+		ph = newElfPhdr();
+		ph->type = PT_GNU_STACK;
+		ph->flags = PF_W+PF_R;
+		ph->align = PtrSize;
+		
+		ph = newElfPhdr();
+		ph->type = PT_PAX_FLAGS;
+		ph->flags = 0x2a00; // mprotect, randexec, emutramp disabled
+		ph->align = PtrSize;
+	}
 
+elfobj:
 	sh = elfshname(".shstrtab");
 	sh->type = SHT_STRTAB;
 	sh->addralign = 1;
 	shsym(sh, lookup(".shstrtab", 0));
 	eh->shstrndx = sh->shnum;
 
+	// put these sections early in the list
+	if(!debug['s']) {
+		elfshname(".symtab");
+		elfshname(".strtab");
+	}
+
 	for(sect=segtext.sect; sect!=nil; sect=sect->next)
 		elfshbits(sect);
 	for(sect=segdata.sect; sect!=nil; sect=sect->next)
 		elfshbits(sect);
+
+	if(linkmode == LinkExternal) {
+		for(sect=segtext.sect; sect!=nil; sect=sect->next)
+			elfshreloc(sect);
+		for(sect=segdata.sect; sect!=nil; sect=sect->next)
+			elfshreloc(sect);
+		// add a .note.GNU-stack section to mark the stack as non-executable
+		sh = elfshname(".note.GNU-stack");
+		sh->type = SHT_PROGBITS;
+		sh->addralign = 1;
+		sh->flags = 0;
+	}
 
 	if(!debug['s']) {
 		sh = elfshname(".symtab");
@@ -1277,12 +1449,22 @@ asmbelf(vlong symo)
 	eh->ident[EI_DATA] = ELFDATA2LSB;
 	eh->ident[EI_VERSION] = EV_CURRENT;
 
-	eh->type = ET_EXEC;
-	eh->version = EV_CURRENT;
-	eh->entry = entryvalue();
+	if(flag_shared)
+		eh->type = ET_DYN;
+	else if(linkmode == LinkExternal)
+		eh->type = ET_REL;
+	else
+		eh->type = ET_EXEC;
 
-	pph->filesz = eh->phnum * eh->phentsize;
-	pph->memsz = pph->filesz;
+	if(linkmode != LinkExternal)
+		eh->entry = entryvalue();
+
+	eh->version = EV_CURRENT;
+
+	if(pph != nil) {
+		pph->filesz = eh->phnum * eh->phentsize;
+		pph->memsz = pph->filesz;
+	}
 
 	cseek(0);
 	a = 0;
@@ -1291,12 +1473,14 @@ asmbelf(vlong symo)
 	a += elfwriteshdrs();
 	if(!debug['d'])
 		a += elfwriteinterp();
-	if(HEADTYPE == Hnetbsd)
-		a += elfwritenetbsdsig();
-	if(HEADTYPE == Hopenbsd)
-		a += elfwriteopenbsdsig();
-	if(buildinfolen > 0)
-		a += elfwritebuildinfo();
+	if(linkmode != LinkExternal) {
+		if(HEADTYPE == Hnetbsd)
+			a += elfwritenetbsdsig();
+		if(HEADTYPE == Hopenbsd)
+			a += elfwriteopenbsdsig();
+		if(buildinfolen > 0)
+			a += elfwritebuildinfo();
+	}
 	if(a > ELFRESERVE)	
 		diag("ELFRESERVE too small: %d > %d", a, ELFRESERVE);
 }

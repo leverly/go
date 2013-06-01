@@ -257,6 +257,8 @@ main(int argc, char *argv[])
 	flagcount("w", "debug type checking", &debug['w']);
 	flagcount("x", "debug lexer", &debug['x']);
 	flagcount("y", "debug declarations in canned imports (with -d)", &debug['y']);
+	if(thechar == '6')
+		flagcount("largemodel", "generate code that assumes a large memory model", &flag_largemodel);
 
 	flagparse(&argc, &argv, usage);
 
@@ -374,6 +376,7 @@ main(int argc, char *argv[])
 			curfn = l->n;
 			saveerrors();
 			typechecklist(l->n->nbody, Etop);
+			checkreturn(l->n);
 			if(nerrors != 0)
 				l->n->nbody = nil;  // type errors; do not compile
 		}
@@ -599,15 +602,13 @@ void
 importfile(Val *f, int line)
 {
 	Biobuf *imp;
-	char *file, *p, *q;
+	char *file, *p, *q, *tag;
 	int32 c;
 	int len;
 	Strlit *path;
 	char *cleanbuf, *prefix;
 
 	USED(line);
-
-	// TODO(rsc): don't bother reloading imports more than once?
 
 	if(f->ctype != CTSTR) {
 		yyerror("import statement not a string");
@@ -683,7 +684,11 @@ importfile(Val *f, int line)
 	// to the lexer to avoid parsing export data twice.
 	if(importpkg->imported) {
 		file = strdup(namebuf);
-		p = smprint("package %s\n$$\n", importpkg->name);
+		tag = "";
+		if(importpkg->safe) {
+			tag = "safe";
+		}
+		p = smprint("package %s %s\n$$\n", importpkg->name, tag);
 		cannedimports(file, p);
 		return;
 	}
@@ -1434,7 +1439,7 @@ getlinepragma(void)
 	Hist *h;
 
 	c = getr();
-	if(c == 'g' && fieldtrack_enabled)
+	if(c == 'g')
 		goto go;
 	if(c != 'l')	
 		goto out;
@@ -1489,18 +1494,32 @@ getlinepragma(void)
 	goto out;
 
 go:
-	for(i=1; i<11; i++) {
-		c = getr();
-		if(c != "go:nointerface"[i])
-			goto out;
-	}
-	nointerface = 1;
+	cp = lexbuf;
+	ep = lexbuf+sizeof(lexbuf)-5;
+	*cp++ = 'g'; // already read
 	for(;;) {
 		c = getr();
-		if(c == EOF || c == '\n')
+		if(c == EOF || c >= Runeself)
+			goto out;
+		if(c == '\n')
 			break;
+		if(cp < ep)
+			*cp++ = c;
 	}
+	*cp = 0;
+	ep = strchr(lexbuf, ' ');
+	if(ep != nil)
+		*ep = 0;
 
+	if(strcmp(lexbuf, "go:nointerface") == 0 && fieldtrack_enabled) {
+		nointerface = 1;
+		goto out;
+	}
+	if(strcmp(lexbuf, "go:noescape") == 0) {
+		noescape = 1;
+		goto out;
+	}
+	
 out:
 	return c;
 }

@@ -83,18 +83,29 @@
 // _cgoexp_GoF immediately returns to crosscall2, which restores the
 // callee-save registers for gcc and returns to GoF, which returns to f.
 
-void *initcgo;	/* filled in by dynamic linker when Cgo is available */
+void *_cgo_init;	/* filled in by dynamic linker when Cgo is available */
 static int64 cgosync;  /* represents possible synchronization in C code */
 
 // These two are only used by the architecture where TLS based storage isn't
 // the default for g and m (e.g., ARM)
-void *cgo_load_gm; /* filled in by dynamic linker when Cgo is available */
-void *cgo_save_gm; /* filled in by dynamic linker when Cgo is available */
+void *_cgo_load_gm; /* filled in by dynamic linker when Cgo is available */
+void *_cgo_save_gm; /* filled in by dynamic linker when Cgo is available */
 
-static void unlockm(void);
 static void unwindm(void);
 
 // Call from Go to C.
+
+static void endcgo(void);
+static FuncVal endcgoV = { endcgo };
+
+// Gives a hint that the next syscall
+// executed by the current goroutine will block.
+// Currently used only on windows.
+void
+net·runtime_blockingSyscallHint(void)
+{
+	g->blockingsyscall = true;
+}
 
 void
 runtime·cgocall(void (*fn)(void*), void *arg)
@@ -119,22 +130,16 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 
 	/*
 	 * Lock g to m to ensure we stay on the same stack if we do a
-	 * cgo callback.
+	 * cgo callback. Add entry to defer stack in case of panic.
 	 */
-	d.special = false;
-	if(m->lockedg == nil) {
-		m->lockedg = g;
-		g->lockedm = m;
-
-		// Add entry to defer stack in case of panic.
-		d.fn = (byte*)unlockm;
-		d.siz = 0;
-		d.link = g->defer;
-		d.argp = (void*)-1;  // unused because unlockm never recovers
-		d.special = true;
-		d.free = false;
-		g->defer = &d;
-	}
+	runtime·lockOSThread();
+	d.fn = &endcgoV;
+	d.siz = 0;
+	d.link = g->defer;
+	d.argp = (void*)-1;  // unused because unlockm never recovers
+	d.special = true;
+	d.free = false;
+	g->defer = &d;
 
 	m->ncgo++;
 
@@ -149,10 +154,24 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 	 * so it is safe to call while "in a system call", outside
 	 * the $GOMAXPROCS accounting.
 	 */
-	runtime·entersyscall();
+	if(g->blockingsyscall) {
+		g->blockingsyscall = false;
+		runtime·entersyscallblock();
+	} else
+		runtime·entersyscall();
 	runtime·asmcgocall(fn, arg);
 	runtime·exitsyscall();
 
+	if(g->defer != &d || d.fn != &endcgoV)
+		runtime·throw("runtime: bad defer entry in cgocallback");
+	g->defer = d.link;
+	endcgo();
+}
+
+static void
+endcgo(void)
+{
+	runtime·unlockOSThread();
 	m->ncgo--;
 	if(m->ncgo == 0) {
 		// We are going back to Go and are not in a recursive
@@ -161,22 +180,8 @@ runtime·cgocall(void (*fn)(void*), void *arg)
 		m->cgomal = nil;
 	}
 
-	if(d.special) {
-		if(g->defer != &d || d.fn != (byte*)unlockm)
-			runtime·throw("runtime: bad defer entry in cgocallback");
-		g->defer = d.link;
-		unlockm();
-	}
-
 	if(raceenabled)
 		runtime·raceacquire(&cgosync);
-}
-
-static void
-unlockm(void)
-{
-	m->lockedg = nil;
-	g->lockedm = nil;
 }
 
 void
@@ -217,13 +222,15 @@ runtime·cfree(void *p)
 
 // Call from C back to Go.
 
+static FuncVal unwindmf = {unwindm};
+
 void
-runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
+runtime·cgocallbackg(FuncVal *fn, void *arg, uintptr argsize)
 {
 	Defer d;
 
 	if(m->racecall) {
-		reflect·call((byte*)fn, arg, argsize);
+		reflect·call(fn, arg, argsize);
 		return;
 	}
 
@@ -232,8 +239,13 @@ runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
 
 	runtime·exitsyscall();	// coming out of cgo call
 
+	if(m->needextram) {
+		m->needextram = 0;
+		runtime·newextram();
+	}
+
 	// Add entry to defer stack in case of panic.
-	d.fn = (byte*)unwindm;
+	d.fn = &unwindmf;
 	d.siz = 0;
 	d.link = g->defer;
 	d.argp = (void*)-1;  // unused because unwindm never recovers
@@ -245,7 +257,7 @@ runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
 		runtime·raceacquire(&cgosync);
 
 	// Invoke callback.
-	reflect·call((byte*)fn, arg, argsize);
+	reflect·call(fn, arg, argsize);
 
 	if(raceenabled)
 		runtime·racereleasemerge(&cgosync);
@@ -253,7 +265,7 @@ runtime·cgocallbackg(void (*fn)(void), void *arg, uintptr argsize)
 	// Pop defer.
 	// Do not unwind m->g0->sched.sp.
 	// Our caller, cgocallback, will do that.
-	if(g->defer != &d || d.fn != (byte*)unwindm)
+	if(g->defer != &d || d.fn != &unwindmf)
 		runtime·throw("runtime: bad defer entry in cgocallback");
 	g->defer = d.link;
 
@@ -287,3 +299,9 @@ runtime·cgounimpl(void)	// called from (incomplete) assembly
 {
 	runtime·throw("runtime: cgo not implemented");
 }
+
+// For cgo-using programs with external linking,
+// export "main" (defined in assembly) so that libc can handle basic
+// C runtime startup and call the Go program as if it were
+// the C main function.
+#pragma cgo_export_static main

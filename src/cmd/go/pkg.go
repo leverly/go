@@ -36,14 +36,15 @@ type Package struct {
 	Root       string `json:",omitempty"` // Go root or Go path dir containing this package
 
 	// Source files
-	GoFiles      []string `json:",omitempty"` // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
-	CgoFiles     []string `json:",omitempty"` // .go sources files that import "C"
-	CFiles       []string `json:",omitempty"` // .c source files
-	HFiles       []string `json:",omitempty"` // .h source files
-	SFiles       []string `json:",omitempty"` // .s source files
-	SysoFiles    []string `json:",omitempty"` // .syso system object files added to package
-	SwigFiles    []string `json:",omitempty"` // .swig files
-	SwigCXXFiles []string `json:",omitempty"` // .swigcxx files
+	GoFiles        []string `json:",omitempty"` // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+	CgoFiles       []string `json:",omitempty"` // .go sources files that import "C"
+	IgnoredGoFiles []string `json:",omitempty"` // .go sources ignored due to build constraints
+	CFiles         []string `json:",omitempty"` // .c source files
+	HFiles         []string `json:",omitempty"` // .h source files
+	SFiles         []string `json:",omitempty"` // .s source files
+	SysoFiles      []string `json:",omitempty"` // .syso system object files added to package
+	SwigFiles      []string `json:",omitempty"` // .swig files
+	SwigCXXFiles   []string `json:",omitempty"` // .swigcxx files
 
 	// Cgo directives
 	CgoCFLAGS    []string `json:",omitempty"` // cgo: flags for C compiler
@@ -71,12 +72,15 @@ type Package struct {
 	imports      []*Package
 	deps         []*Package
 	gofiles      []string // GoFiles+CgoFiles+TestGoFiles+XTestGoFiles files, absolute paths
+	sfiles       []string
+	allgofiles   []string // gofiles + IgnoredGoFiles, absolute paths
 	target       string   // installed file for this package (may be executable)
 	fake         bool     // synthesized package
 	forceBuild   bool     // this package must be rebuilt
 	forceLibrary bool     // this package is a library (even if named "main")
 	local        bool     // imported via local path (./ or ../)
 	localPrefix  string   // interpret ./ and ../ imports relative to this prefix
+	exeName      string   // desired name for temporary executable
 }
 
 func (p *Package) copyBuild(pp *build.Package) {
@@ -92,6 +96,7 @@ func (p *Package) copyBuild(pp *build.Package) {
 	p.Standard = p.Goroot && p.ImportPath != "" && !strings.Contains(p.ImportPath, ".")
 	p.GoFiles = pp.GoFiles
 	p.CgoFiles = pp.CgoFiles
+	p.IgnoredGoFiles = pp.IgnoredGoFiles
 	p.CFiles = pp.CFiles
 	p.HFiles = pp.HFiles
 	p.SFiles = pp.SFiles
@@ -120,6 +125,9 @@ func (p *PackageError) Error() string {
 		// Omit import stack.  The full path to the file where the error
 		// is the most important thing.
 		return p.Pos + ": " + p.Err
+	}
+	if len(p.ImportStack) == 0 {
+		return p.Err
 	}
 	return "package " + strings.Join(p.ImportStack, "\n\timports ") + ": " + p.Err
 }
@@ -318,11 +326,13 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 			// Install cross-compiled binaries to subdirectories of bin.
 			elem = full
 		}
-		p.target = filepath.Join(p.build.BinDir, elem)
+		if p.build.BinDir != "" {
+			p.target = filepath.Join(p.build.BinDir, elem)
+		}
 		if p.Goroot && (isGoTool[p.ImportPath] || strings.HasPrefix(p.ImportPath, "exp/")) {
 			p.target = filepath.Join(gorootPkg, "tool", full)
 		}
-		if buildContext.GOOS == "windows" {
+		if p.target != "" && buildContext.GOOS == "windows" {
 			p.target += ".exe"
 		}
 	} else if p.local {
@@ -356,6 +366,44 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 		p.gofiles[i] = filepath.Join(p.Dir, p.gofiles[i])
 	}
 	sort.Strings(p.gofiles)
+
+	p.sfiles = stringList(p.SFiles)
+	for i := range p.sfiles {
+		p.sfiles[i] = filepath.Join(p.Dir, p.sfiles[i])
+	}
+	sort.Strings(p.sfiles)
+
+	p.allgofiles = stringList(p.IgnoredGoFiles)
+	for i := range p.allgofiles {
+		p.allgofiles[i] = filepath.Join(p.Dir, p.allgofiles[i])
+	}
+	p.allgofiles = append(p.allgofiles, p.gofiles...)
+	sort.Strings(p.allgofiles)
+
+	// Check for case-insensitive collision of input files.
+	// To avoid problems on case-insensitive files, we reject any package
+	// where two different input files have equal names under a case-insensitive
+	// comparison.
+	f1, f2 := foldDup(stringList(
+		p.GoFiles,
+		p.CgoFiles,
+		p.IgnoredGoFiles,
+		p.CFiles,
+		p.HFiles,
+		p.SFiles,
+		p.SysoFiles,
+		p.SwigFiles,
+		p.SwigCXXFiles,
+		p.TestGoFiles,
+		p.XTestGoFiles,
+	))
+	if f1 != "" {
+		p.Error = &PackageError{
+			ImportStack: stk.copy(),
+			Err:         fmt.Sprintf("case-insensitive file name collision: %q and %q", f1, f2),
+		}
+		return p
+	}
 
 	// Build list of imported packages and full dependency list.
 	imports := make([]*Package, 0, len(p.Imports))
@@ -410,8 +458,21 @@ func (p *Package) load(stk *importStack, bp *build.Package, err error) *Package 
 	if p.Standard && (p.ImportPath == "unsafe" || buildContext.Compiler == "gccgo") {
 		p.target = ""
 	}
-
 	p.Target = p.target
+
+	// In the absence of errors lower in the dependency tree,
+	// check for case-insensitive collisions of import paths.
+	if len(p.DepsErrors) == 0 {
+		dep1, dep2 := foldDup(p.Deps)
+		if dep1 != "" {
+			p.Error = &PackageError{
+				ImportStack: stk.copy(),
+				Err:         fmt.Sprintf("case-insensitive import collision: %q and %q", dep1, dep2),
+			}
+			return p
+		}
+	}
+
 	return p
 }
 
@@ -431,7 +492,7 @@ func (p *Package) swigSoname(file string) string {
 func (p *Package) swigDir(ctxt *build.Context) string {
 	dir := p.build.PkgRoot
 	if ctxt.Compiler == "gccgo" {
-		dir = filepath.Join(dir, "gccgo")
+		dir = filepath.Join(dir, "gccgo_"+ctxt.GOOS+"_"+ctxt.GOARCH)
 	} else {
 		dir = filepath.Join(dir, ctxt.GOOS+"_"+ctxt.GOARCH)
 	}
@@ -596,12 +657,23 @@ func loadPackage(arg string, stk *importStack) *Package {
 			arg = sub
 		}
 	}
-	if strings.HasPrefix(arg, "cmd/") && !strings.Contains(arg[4:], "/") {
+	if strings.HasPrefix(arg, "cmd/") {
 		if p := cmdCache[arg]; p != nil {
 			return p
 		}
 		stk.push(arg)
 		defer stk.pop()
+
+		if strings.Contains(arg[4:], "/") {
+			p := &Package{
+				Error: &PackageError{
+					ImportStack: stk.copy(),
+					Err:         fmt.Sprintf("invalid import path: cmd/... is reserved for Go commands"),
+				},
+			}
+			return p
+		}
+
 		bp, err := buildContext.ImportDir(filepath.Join(gorootSrc, arg), 0)
 		bp.ImportPath = arg
 		bp.Goroot = true

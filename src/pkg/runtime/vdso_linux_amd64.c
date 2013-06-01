@@ -4,6 +4,7 @@
 
 #include "runtime.h"
 
+#define AT_RANDOM 25
 #define AT_SYSINFO_EHDR 33
 #define AT_NULL	0    /* End of vector */
 #define PT_LOAD	1    /* Loadable program segment */
@@ -170,7 +171,9 @@ static symbol_key sym_keys[] = {
 	{ (byte*)"__vdso_clock_gettime", &runtime·__vdso_clock_gettime_sym },
 };
 
-static void vdso_init_from_sysinfo_ehdr(struct vdso_info *vdso_info, Elf64_Ehdr* hdr) {
+static void
+vdso_init_from_sysinfo_ehdr(struct vdso_info *vdso_info, Elf64_Ehdr* hdr)
+{
 	uint64 i;
 	bool found_vaddr = false;
 
@@ -237,7 +240,9 @@ static void vdso_init_from_sysinfo_ehdr(struct vdso_info *vdso_info, Elf64_Ehdr*
 	vdso_info->valid = true;
 }
 
-static int32 vdso_find_version(struct vdso_info *vdso_info, version_key* ver) {
+static int32
+vdso_find_version(struct vdso_info *vdso_info, version_key* ver)
+{
 	if(vdso_info->valid == false) {
 		return 0;
 	}
@@ -259,7 +264,9 @@ static int32 vdso_find_version(struct vdso_info *vdso_info, version_key* ver) {
 	return 0;
 }
 
-static void vdso_parse_symbols(struct vdso_info *vdso_info, int32 version) {
+static void
+vdso_parse_symbols(struct vdso_info *vdso_info, int32 version)
+{
 	int32 i, j;
 
 	if(vdso_info->valid == false)
@@ -313,11 +320,16 @@ runtime·linux_setup_vdso(int32 argc, uint8** argv)
 		if(elf_auxv[i].a_type == AT_SYSINFO_EHDR) {
 			if(elf_auxv[i].a_un.a_val == 0) {
 				// Something went wrong
-				return;
+				continue;
 			}
 			vdso_init_from_sysinfo_ehdr(&vdso_info, (Elf64_Ehdr*)elf_auxv[i].a_un.a_val);
 			vdso_parse_symbols(&vdso_info, vdso_find_version(&vdso_info, &linux26));
-			return;
+			continue;
+		}
+		if(elf_auxv[i].a_type == AT_RANDOM) {
+		        runtime·startup_random_data = (byte*)elf_auxv[i].a_un.a_val;
+		        runtime·startup_random_data_len = 16;
+			continue;
 		}
 	}
 }

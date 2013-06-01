@@ -281,7 +281,7 @@ analyze(NodeList *all, int recursive)
 
 	// print("escapes: %d e->dsts, %d edges\n", e->dstcount, e->edgecount);
 
-	// visit the updstream of each dst, mark address nodes with
+	// visit the upstream of each dst, mark address nodes with
 	// addrescapes, mark parameters unsafe
 	for(l = e->dsts; l; l=l->next)
 		escflood(e, l->n);
@@ -330,7 +330,10 @@ escfunc(EscState *e, Node *func)
 		case PPARAM:
 			if(ll->n->type && !haspointers(ll->n->type))
 				break;
-			ll->n->esc = EscNone;	// prime for escflood later
+			if(curfn->nbody == nil && !curfn->noescape)
+				ll->n->esc = EscHeap;
+			else
+				ll->n->esc = EscNone;	// prime for escflood later
 			e->noesc = list(e->noesc, ll->n);
 			ll->n->escloopdepth = 1; 
 			break;
@@ -593,6 +596,14 @@ esc(EscState *e, Node *n)
 		// Contents make it to memory, lose track.
 		escassign(e, &e->theSink, n->left);
 		break;
+	
+	case OCALLPART:
+		n->esc = EscNone; // until proven otherwise
+		e->noesc = list(e->noesc, n);
+		n->escloopdepth = e->loopdepth;
+		// Contents make it to memory, lose track.
+		escassign(e, &e->theSink, n->left);
+		break;
 
 	case OMAPLIT:
 		n->esc = EscNone;  // until proven otherwise
@@ -664,6 +675,7 @@ escassign(EscState *e, Node *dst, Node *src)
 	case OCONVNOP:
 	case OMAPLIT:
 	case OSTRUCTLIT:
+	case OCALLPART:
 		break;
 
 	case ONAME:
@@ -710,6 +722,7 @@ escassign(EscState *e, Node *dst, Node *src)
 	case OMAKESLICE:
 	case ONEW:
 	case OCLOSURE:
+	case OCALLPART:
 		escflows(e, dst, src);
 		break;
 
@@ -799,7 +812,7 @@ escassignfromtag(EscState *e, Strlit *note, NodeList *dsts, Node *src)
 
 // This is a bit messier than fortunate, pulled out of esc's big
 // switch for clarity.	We either have the paramnodes, which may be
-// connected to other things throug flows or we have the parameter type
+// connected to other things through flows or we have the parameter type
 // nodes, which may be marked "noescape". Navigating the ast is slightly
 // different for methods vs plain functions and for imported vs
 // this-package
@@ -981,15 +994,29 @@ escflood(EscState *e, Node *dst)
 	}
 }
 
+// There appear to be some loops in the escape graph, causing
+// arbitrary recursion into deeper and deeper levels.
+// Cut this off safely by making minLevel sticky: once you
+// get that deep, you cannot go down any further but you also
+// cannot go up any further. This is a conservative fix.
+// Making minLevel smaller (more negative) would handle more
+// complex chains of indirections followed by address-of operations,
+// at the cost of repeating the traversal once for each additional
+// allowed level when a loop is encountered. Using -2 suffices to
+// pass all the tests we have written so far, which we assume matches
+// the level of complexity we want the escape analysis code to handle.
+#define MinLevel (-2)
+
 static void
 escwalk(EscState *e, int level, Node *dst, Node *src)
 {
 	NodeList *ll;
-	int leaks;
+	int leaks, newlevel;
 
-	if(src->walkgen == walkgen)
+	if(src->walkgen == walkgen && src->esclevel <= level)
 		return;
 	src->walkgen = walkgen;
+	src->esclevel = level;
 
 	if(debug['m']>1)
 		print("escwalk: level:%d depth:%d %.*s %hN(%hJ) scope:%S[%d]\n",
@@ -1016,7 +1043,7 @@ escwalk(EscState *e, int level, Node *dst, Node *src)
 
 	switch(src->op) {
 	case ONAME:
-		if(src->class == PPARAM && leaks && src->esc != EscHeap) {
+		if(src->class == PPARAM && (leaks || dst->escloopdepth < 0) && src->esc != EscHeap) {
 			src->esc = EscScope;
 			if(debug['m'])
 				warnl(src->lineno, "leaking param: %hN", src);
@@ -1039,7 +1066,10 @@ escwalk(EscState *e, int level, Node *dst, Node *src)
 			if(debug['m'])
 				warnl(src->lineno, "%hN escapes to heap", src);
 		}
-		escwalk(e, level-1, dst, src->left);
+		newlevel = level;
+		if(level > MinLevel)
+			newlevel--;
+		escwalk(e, newlevel, dst, src->left);
 		break;
 
 	case OARRAYLIT:
@@ -1053,6 +1083,7 @@ escwalk(EscState *e, int level, Node *dst, Node *src)
 	case OMAPLIT:
 	case ONEW:
 	case OCLOSURE:
+	case OCALLPART:
 		if(leaks) {
 			src->esc = EscHeap;
 			if(debug['m'])
@@ -1074,7 +1105,10 @@ escwalk(EscState *e, int level, Node *dst, Node *src)
 	case ODOTPTR:
 	case OINDEXMAP:
 	case OIND:
-		escwalk(e, level+1, dst, src->left);
+		newlevel = level;
+		if(level > MinLevel)
+			newlevel++;
+		escwalk(e, newlevel, dst, src->left);
 	}
 
 recurse:
@@ -1089,13 +1123,21 @@ esctag(EscState *e, Node *func)
 {
 	Node *savefn;
 	NodeList *ll;
-	
+	Type *t;
+
 	USED(e);
 	func->esc = EscFuncTagged;
 	
-	// External functions must be assumed unsafe.
-	if(func->nbody == nil)
+	// External functions are assumed unsafe,
+	// unless //go:noescape is given before the declaration.
+	if(func->nbody == nil) {
+		if(func->noescape) {
+			for(t=getinargx(func->type)->type; t; t=t->down)
+				if(haspointers(t->type))
+					t->note = mktag(EscNone);
+		}
 		return;
+	}
 
 	savefn = curfn;
 	curfn = func;

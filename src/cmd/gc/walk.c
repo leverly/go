@@ -24,43 +24,10 @@ static	Node*	append(Node*, NodeList**);
 static	Node*	sliceany(Node*, NodeList**);
 static	void	walkcompare(Node**, NodeList**);
 static	void	walkrotate(Node**);
+static	void	walkmul(Node**, NodeList**);
 static	void	walkdiv(Node**, NodeList**);
 static	int	bounded(Node*, int64);
 static	Mpint	mpzero;
-
-// can this code branch reach the end
-// without an unconditional RETURN
-// this is hard, so it is conservative
-static int
-walkret(NodeList *l)
-{
-	Node *n;
-
-loop:
-	while(l && l->next)
-		l = l->next;
-	if(l == nil)
-		return 1;
-
-	// at this point, we have the last
-	// statement of the function
-	n = l->n;
-	switch(n->op) {
-	case OBLOCK:
-		l = n->list;
-		goto loop;
-
-	case OGOTO:
-	case ORETURN:
-	case OPANIC:
-		return 0;
-		break;
-	}
-
-	// all other statements
-	// will flow to the end
-	return 1;
-}
 
 void
 walk(Node *fn)
@@ -75,9 +42,6 @@ walk(Node *fn)
 		snprint(s, sizeof(s), "\nbefore %S", curfn->nname->sym);
 		dumplist(s, curfn->nbody);
 	}
-	if(curfn->type->outtuple)
-		if(walkret(curfn->nbody))
-			yyerror("function ends without a return statement");
 
 	lno = lineno;
 
@@ -220,6 +184,7 @@ walkstmt(Node **np)
 	case OLABEL:
 	case ODCLCONST:
 	case ODCLTYPE:
+	case OCHECKNOTNIL:
 		break;
 
 	case OBLOCK:
@@ -415,7 +380,7 @@ walkexpr(Node **np, NodeList **init)
 	switch(n->op) {
 	default:
 		dump("walk", n);
-		fatal("walkexpr: switch 1 unknown op %N", n);
+		fatal("walkexpr: switch 1 unknown op %+hN", n);
 		break;
 
 	case OTYPE:
@@ -432,16 +397,30 @@ walkexpr(Node **np, NodeList **init)
 	case OIMAG:
 	case ODOTMETH:
 	case ODOTINTER:
+		walkexpr(&n->left, init);
+		goto ret;
+
 	case OIND:
+		if(n->left->type->type->width == 0) {
+			n->left = cheapexpr(n->left, init);
+			checknotnil(n->left, init);
+		}
 		walkexpr(&n->left, init);
 		goto ret;
 
 	case ODOT:
-	case ODOTPTR:
 		usefield(n);
 		walkexpr(&n->left, init);
 		goto ret;
-		
+
+	case ODOTPTR:
+		usefield(n);
+		if(n->op == ODOTPTR && n->left->type->type->width == 0) {
+			n->left = cheapexpr(n->left, init);
+			checknotnil(n->left, init);
+		}
+		walkexpr(&n->left, init);
+		goto ret;
 
 	case OEFACE:
 		walkexpr(&n->left, init);
@@ -481,7 +460,6 @@ walkexpr(Node **np, NodeList **init)
 
 	case OAND:
 	case OSUB:
-	case OMUL:
 	case OHMUL:
 	case OLT:
 	case OLE:
@@ -537,6 +515,11 @@ walkexpr(Node **np, NodeList **init)
 		n->addable = 1;
 		goto ret;
 
+	case OCLOSUREVAR:
+	case OCFUNC:
+		n->addable = 1;
+		goto ret;
+
 	case ONAME:
 		if(!(n->class & PHEAP) && n->class != PPARAMREF)
 			n->addable = 1;
@@ -556,11 +539,6 @@ walkexpr(Node **np, NodeList **init)
 		t = n->left->type;
 		if(n->list && n->list->n->op == OAS)
 			goto ret;
-
-		if(n->left->op == OCLOSURE) {
-			walkcallclosure(n, init);
-			t = n->left->type;
-		}
 
 		walkexpr(&n->left, init);
 		walkexprlist(n->list, init);
@@ -667,8 +645,48 @@ walkexpr(Node **np, NodeList **init)
 		r = n->rlist->n;
 		walkexprlistsafe(n->list, init);
 		walkexpr(&r->left, init);
-		fn = mapfn("mapaccess2", r->left->type);
-		r = mkcall1(fn, getoutargx(fn->type), init, typename(r->left->type), r->left, r->right);
+		t = r->left->type;
+		p = nil;
+		if(t->type->width <= 128) { // Check ../../pkg/runtime/hashmap.c:MAXVALUESIZE before changing.
+			switch(simsimtype(t->down)) {
+			case TINT32:
+			case TUINT32:
+				p = "mapaccess2_fast32";
+				break;
+			case TINT64:
+			case TUINT64:
+				p = "mapaccess2_fast64";
+				break;
+			case TSTRING:
+				p = "mapaccess2_faststr";
+				break;
+			}
+		}
+		if(p != nil) {
+			// from:
+			//   a,b = m[i]
+			// to:
+			//   var,b = mapaccess2_fast*(t, m, i)
+			//   a = *var
+			a = n->list->n;
+			var = temp(ptrto(t->type));
+			var->typecheck = 1;
+
+			fn = mapfn(p, t);
+			r = mkcall1(fn, getoutargx(fn->type), init, typename(t), r->left, r->right);
+			n->rlist = list1(r);
+			n->op = OAS2FUNC;
+			n->list->n = var;
+			walkexpr(&n, init);
+			*init = list(*init, n);
+
+			n = nod(OAS, a, nod(OIND, var, N));
+			typecheck(&n, Etop);
+			walkexpr(&n, init);
+			goto ret;
+		}
+		fn = mapfn("mapaccess2", t);
+		r = mkcall1(fn, getoutargx(fn->type), init, typename(t), r->left, r->right);
 		n->rlist = list1(r);
 		n->op = OAS2FUNC;
 		goto as2func;
@@ -926,10 +944,16 @@ walkexpr(Node **np, NodeList **init)
 
 	case OANDNOT:
 		walkexpr(&n->left, init);
-		walkexpr(&n->right, init);
 		n->op = OAND;
 		n->right = nod(OCOM, n->right, N);
 		typecheck(&n->right, Erv);
+		walkexpr(&n->right, init);
+		goto ret;
+
+	case OMUL:
+		walkexpr(&n->left, init);
+		walkexpr(&n->right, init);
+		walkmul(&n, init);
 		goto ret;
 
 	case ODIV:
@@ -1029,7 +1053,33 @@ walkexpr(Node **np, NodeList **init)
 			goto ret;
 
 		t = n->left->type;
-		n = mkcall1(mapfn("mapaccess1", t), t->type, init, typename(t), n->left, n->right);
+		p = nil;
+		if(t->type->width <= 128) {  // Check ../../pkg/runtime/hashmap.c:MAXVALUESIZE before changing.
+			switch(simsimtype(t->down)) {
+			case TINT32:
+			case TUINT32:
+				p = "mapaccess1_fast32";
+				break;
+			case TINT64:
+			case TUINT64:
+				p = "mapaccess1_fast64";
+				break;
+			case TSTRING:
+				p = "mapaccess1_faststr";
+				break;
+			}
+		}
+		if(p != nil) {
+			// use fast version.  The fast versions return a pointer to the value - we need
+			// to dereference it to get the result.
+			n = mkcall1(mapfn(p, t), ptrto(t->type), init, typename(t), n->left, n->right);
+			n = nod(OIND, n, N);
+			n->type = t->type;
+			n->typecheck = 1;
+		} else {
+			// no fast version for this key
+			n = mkcall1(mapfn("mapaccess1", t), t->type, init, typename(t), n->left, n->right);
+		}
 		goto ret;
 
 	case ORECV:
@@ -1280,6 +1330,10 @@ walkexpr(Node **np, NodeList **init)
 	case OCLOSURE:
 		n = walkclosure(n, init);
 		goto ret;
+	
+	case OCALLPART:
+		n = walkpartialcall(n, init);
+		goto ret;
 	}
 	fatal("missing switch %O", n->op);
 
@@ -1296,9 +1350,16 @@ ret:
 static Node*
 ascompatee1(int op, Node *l, Node *r, NodeList **init)
 {
+	Node *n;
 	USED(op);
+	
+	// convas will turn map assigns into function calls,
+	// making it impossible for reorder3 to work.
+	n = nod(OAS, l, r);
+	if(l->op == OINDEXMAP)
+		return n;
 
-	return convas(nod(OAS, l, r), init);
+	return convas(n, init);
 }
 
 static NodeList*
@@ -1319,12 +1380,16 @@ ascompatee(int op, NodeList *nl, NodeList *nr, NodeList **init)
 		lr->n = safeexpr(lr->n, init);
 
 	nn = nil;
-	for(ll=nl, lr=nr; ll && lr; ll=ll->next, lr=lr->next)
+	for(ll=nl, lr=nr; ll && lr; ll=ll->next, lr=lr->next) {
+		// Do not generate 'x = x' during return. See issue 4014.
+		if(op == ORETURN && ll->n == lr->n)
+			continue;
 		nn = list(nn, ascompatee1(op, ll->n, lr->n, init));
+	}
 
 	// cannot happen: caller checked that lists had same length
 	if(ll || lr)
-		yyerror("error in shape across %+H %O %+H", nl, op, nr);
+		yyerror("error in shape across %+H %O %+H / %d %d [%s]", nl, op, nr, count(nl), count(nr), curfn->nname->sym->name);
 	return nn;
 }
 
@@ -1896,13 +1961,14 @@ static int aliased(Node*, NodeList*, NodeList*);
 static NodeList*
 reorder3(NodeList *all)
 {
-	NodeList *list, *early;
+	NodeList *list, *early, *mapinit;
 	Node *l;
 
 	// If a needed expression may be affected by an
 	// earlier assignment, make an early copy of that
 	// expression and use the copy instead.
 	early = nil;
+	mapinit = nil;
 	for(list=all; list; list=list->next) {
 		l = list->n->left;
 
@@ -1926,8 +1992,11 @@ reorder3(NodeList *all)
 		case ONAME:
 			break;
 		case OINDEX:
+		case OINDEXMAP:
 			reorder3save(&l->left, all, list, &early);
 			reorder3save(&l->right, all, list, &early);
+			if(l->op == OINDEXMAP)
+				list->n = convas(list->n, &mapinit);
 			break;
 		case OIND:
 		case ODOTPTR:
@@ -1938,6 +2007,7 @@ reorder3(NodeList *all)
 		reorder3save(&list->n->right, all, list, &early);
 	}
 
+	early = concat(mapinit, early);
 	return concat(early, all);
 }
 
@@ -2189,6 +2259,8 @@ paramstoheap(Type **argin, int out)
 	nn = nil;
 	for(t = structfirst(&savet, argin); t != T; t = structnext(&savet)) {
 		v = t->nname;
+		if(v && v->sym && v->sym->name[0] == '~')
+			v = N;
 		if(v == N && out && hasdefer) {
 			// Defer might stop a panic and show the
 			// return values as they exist at the time of panic.
@@ -2784,11 +2856,19 @@ walkcompare(Node **np, NodeList **init)
 	typecheck(&call, Etop);
 	walkstmt(&call);
 	*init = list(*init, call);
-	
-	if(n->op == OEQ)
-		r = tempbool;
-	else
-		r = nod(ONOT, tempbool, N);
+
+	// tempbool cannot be used directly as multiple comparison
+	// expressions may exist in the same statement. Create another
+	// temporary to hold the value (its address is not taken so it can
+	// be optimized away).
+	r = temp(types[TBOOL]);
+	a = nod(OAS, r, tempbool);
+	typecheck(&a, Etop);
+	walkstmt(&a);
+	*init = list(*init, a);
+
+	if(n->op != OEQ)
+		r = nod(ONOT, r, N);
 	typecheck(&r, Erv);
 	walkexpr(&r, init);
 	*np = r;
@@ -2817,14 +2897,29 @@ hard:
 static int
 samecheap(Node *a, Node *b)
 {
-	if(a == N || b == N || a->op != b->op)
-		return 0;
-	
-	switch(a->op) {
-	case ONAME:
-		return a == b;
-	// TODO: Could do more here, but maybe this is enough.
-	// It's all cheapexpr does.
+	Node *ar, *br;
+	while(a != N && b != N && a->op == b->op) {
+		switch(a->op) {
+		default:
+			return 0;
+		case ONAME:
+			return a == b;
+		case ODOT:
+		case ODOTPTR:
+			ar = a->right;
+			br = b->right;
+			if(ar->op != ONAME || br->op != ONAME || ar->sym != br->sym)
+				return 0;
+			break;
+		case OINDEX:
+			ar = a->right;
+			br = b->right;
+			if(!isconst(ar, CTINT) || !isconst(br, CTINT) || mpcmpfixfix(ar->val.u.xval, br->val.u.xval) != 0)
+				return 0;
+			break;
+		}
+		a = a->left;
+		b = b->left;
 	}
 	return 0;
 }
@@ -2879,6 +2974,70 @@ yes:
 
 	*np = n;
 	return;
+}
+
+/*
+ * walkmul rewrites integer multiplication by powers of two as shifts.
+ */
+static void
+walkmul(Node **np, NodeList **init)
+{
+	Node *n, *nl, *nr;
+	int pow, neg, w;
+	
+	n = *np;
+	if(!isint[n->type->etype])
+		return;
+
+	if(n->right->op == OLITERAL) {
+		nl = n->left;
+		nr = n->right;
+	} else if(n->left->op == OLITERAL) {
+		nl = n->right;
+		nr = n->left;
+	} else
+		return;
+
+	neg = 0;
+
+	// x*0 is 0 (and side effects of x).
+	if(mpgetfix(nr->val.u.xval) == 0) {
+		cheapexpr(nl, init);
+		nodconst(n, n->type, 0);
+		goto ret;
+	}
+
+	// nr is a constant.
+	pow = powtwo(nr);
+	if(pow < 0)
+		return;
+	if(pow >= 1000) {
+		// negative power of 2, like -16
+		neg = 1;
+		pow -= 1000;
+	}
+
+	w = nl->type->width*8;
+	if(pow+1 >= w)// too big, shouldn't happen
+		return;
+
+	nl = cheapexpr(nl, init);
+
+	if(pow == 0) {
+		// x*1 is x
+		n = nl;
+		goto ret;
+	}
+	
+	n = nod(OLSH, nl, nodintconst(pow));
+
+ret:
+	if(neg)
+		n = nod(OMINUS, n, N);
+
+	typecheck(&n, Erv);
+	walkexpr(&n, init);
+	*np = n;
 }
 
 /*

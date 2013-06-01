@@ -86,6 +86,7 @@ typedef struct MSpan	MSpan;
 typedef struct MStats	MStats;
 typedef struct MLink	MLink;
 typedef struct MTypes	MTypes;
+typedef struct GCStats	GCStats;
 
 enum
 {
@@ -114,10 +115,18 @@ enum
 	HeapAllocChunk = 1<<20,		// Chunk size for heap growth
 
 	// Number of bits in page to span calculations (4k pages).
-	// On 64-bit, we limit the arena to 128GB, or 37 bits.
+	// On Windows 64-bit we limit the arena to 32GB or 35 bits (see below for reason).
+	// On other 64-bit platforms, we limit the arena to 128GB, or 37 bits.
 	// On 32-bit, we don't bother limiting anything, so we use the full 32-bit address.
 #ifdef _64BIT
+#ifdef GOOS_windows
+	// Windows counts memory used by page table into committed memory
+	// of the process, so we can't reserve too much memory.
+	// See http://golang.org/issue/5402 and http://golang.org/issue/5236.
+	MHeapMap_Bits = 35 - PageShift,
+#else
 	MHeapMap_Bits = 37 - PageShift,
+#endif
 #else
 	MHeapMap_Bits = 32 - PageShift,
 #endif
@@ -133,7 +142,7 @@ enum
 // This must be a #define instead of an enum because it
 // is so large.
 #ifdef _64BIT
-#define	MaxMem	(1ULL<<(MHeapMap_Bits+PageShift))	/* 128 GB */
+#define	MaxMem	(1ULL<<(MHeapMap_Bits+PageShift))	/* 128 GB or 32 GB */
 #else
 #define	MaxMem	((uintptr)-1)
 #endif
@@ -229,7 +238,7 @@ struct MStats
 	uint64	buckhash_sys;	// profiling bucket hash table
 
 	// Statistics about garbage collector.
-	// Protected by stopping the world during GC.
+	// Protected by mheap or stopping the world during GC.
 	uint64	next_gc;	// next GC (in heap_alloc time)
 	uint64  last_gc;	// last GC (in absolute time)
 	uint64	pause_total_ns;
@@ -248,7 +257,6 @@ struct MStats
 
 #define mstats runtime·memStats	/* name shared with Go */
 extern MStats mstats;
-
 
 // Size classes.  Computed and initialized by InitSizes.
 //
@@ -416,10 +424,10 @@ struct MHeap
 	byte *arena_end;
 
 	// central free lists for small size classes.
-	// the union makes sure that the MCentrals are
+	// the padding makes sure that the MCentrals are
 	// spaced CacheLineSize bytes apart, so that each MCentral.Lock
 	// gets its own cache line.
-	union {
+	struct {
 		MCentral;
 		byte pad[CacheLineSize];
 	} central[NumSizeClasses];
@@ -427,7 +435,7 @@ struct MHeap
 	FixAlloc spanalloc;	// allocator for Span*
 	FixAlloc cachealloc;	// allocator for MCache*
 };
-extern MHeap runtime·mheap;
+extern MHeap *runtime·mheap;
 
 void	runtime·MHeap_Init(MHeap *h, void *(*allocator)(uintptr));
 MSpan*	runtime·MHeap_Alloc(MHeap *h, uintptr npage, int32 sizeclass, int32 acct, int32 zeroed);
@@ -446,7 +454,7 @@ void	runtime·markallocated(void *v, uintptr n, bool noptr);
 void	runtime·checkallocated(void *v, uintptr n);
 void	runtime·markfreed(void *v, uintptr n);
 void	runtime·checkfreed(void *v, uintptr n);
-int32	runtime·checking;
+extern	int32	runtime·checking;
 void	runtime·markspan(void *v, uintptr size, uintptr n, bool leftover);
 void	runtime·unmarkspan(void *v, uintptr size);
 bool	runtime·blockspecial(void*);
@@ -474,7 +482,7 @@ int32	runtime·gcprocs(void);
 void	runtime·helpgc(int32 nproc);
 void	runtime·gchelper(void);
 
-bool	runtime·getfinalizer(void *p, bool del, void (**fn)(void*), uintptr *nret);
+bool	runtime·getfinalizer(void *p, bool del, FuncVal **fn, uintptr *nret);
 void	runtime·walkfintab(void (*fn)(void*));
 
 enum
@@ -482,6 +490,7 @@ enum
 	TypeInfo_SingleObject = 0,
 	TypeInfo_Array = 1,
 	TypeInfo_Map = 2,
+	TypeInfo_Chan = 3,
 
 	// Enables type information at the end of blocks allocated from heap	
 	DebugTypeAtBlockEnd = 0,

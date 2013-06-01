@@ -124,6 +124,9 @@ main(int argc, char *argv[])
 	cinit();
 	ginit();
 	arginit();
+	
+	fmtstrinit(&pragcgobuf);
+	quotefmtinstall();
 
 	tufield = simplet((1L<<tfield->etype) | BUNSIGNED);
 	ndef = 0;
@@ -174,6 +177,8 @@ main(int argc, char *argv[])
 	flagcount("t", "debug code generation", &debug['t']);
 	flagcount("w", "enable warnings", &debug['w']);
 	flagcount("v", "increase debug verbosity", &debug['v']);	
+	if(thechar == '6')
+		flagcount("largemodel", "generate code that assumes a large memory model", &flag_largemodel);
 	
 	flagparse(&argc, &argv, usage);
 

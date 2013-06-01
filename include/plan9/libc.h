@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#define Runemax Plan9Runemax
 #include "/sys/include/libc.h"
+#undef Runemax
 #include "/sys/include/ctype.h"
 
 enum
@@ -16,6 +18,7 @@ char*	getgoroot(void);
 char*	getgoversion(void);
 char*	getgoarm(void);
 char*	getgo386(void);
+char*	getgoextlinkenabled(void);
 
 void	flagcount(char*, char*, int*);
 void	flagint32(char*, char*, int32*);

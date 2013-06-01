@@ -121,27 +121,95 @@ putelfsym(Sym *x, char *s, int t, vlong addr, vlong size, int ver, Sym *go)
 
 	// One pass for each binding: STB_LOCAL, STB_GLOBAL,
 	// maybe one day STB_WEAK.
-	bind = (ver || (x->type & SHIDDEN)) ? STB_LOCAL : STB_GLOBAL;
+	bind = STB_GLOBAL;
+	if(ver || (x->type & SHIDDEN))
+		bind = STB_LOCAL;
+
+	// In external linking mode, we have to invoke gcc with -rdynamic
+	// to get the exported symbols put into the dynamic symbol table.
+	// To avoid filling the dynamic table with lots of unnecessary symbols,
+	// mark all Go symbols local (not global) in the final executable.
+	if(linkmode == LinkExternal && !(x->cgoexport&CgoExportStatic))
+		bind = STB_LOCAL;
+
 	if(bind != elfbind)
 		return;
 
 	off = putelfstr(s);
+	if(linkmode == LinkExternal)
+		addr -= xo->sect->vaddr;
 	putelfsyment(off, addr, size, (bind<<4)|(type&0xf), xo->sect->elfsect->shnum, (x->type & SHIDDEN) ? 2 : 0);
 	x->elfsym = numelfsym++;
 }
 
 void
+putelfsectionsym(Sym* s, int shndx)
+{
+	putelfsyment(0, 0, 0, (STB_LOCAL<<4)|STT_SECTION, shndx, 0);
+	s->elfsym = numelfsym++;
+}
+
+void
+putelfsymshndx(vlong sympos, int shndx)
+{
+	vlong here;
+
+	here = cpos();
+	switch(thechar) {
+	case '6':
+		cseek(sympos+6);
+		break;
+	default:
+		cseek(sympos+14);
+		break;
+	}
+	WPUT(shndx);
+	cseek(here);
+}
+
+void
 asmelfsym(void)
 {
+	Sym *s;
+
 	// the first symbol entry is reserved
 	putelfsyment(0, 0, 0, (STB_LOCAL<<4)|STT_NOTYPE, 0, 0);
 
+	dwarfaddelfsectionsyms();
+
 	elfbind = STB_LOCAL;
 	genasmsym(putelfsym);
+	
+	if(linkmode == LinkExternal && HEADTYPE != Hopenbsd) {
+		s = lookup("runtime.m", 0);
+		if(s->sect == nil) {
+			cursym = nil;
+			diag("missing section for %s", s->name);
+			errorexit();
+		}
+		putelfsyment(putelfstr(s->name), 0, PtrSize, (STB_LOCAL<<4)|STT_TLS, s->sect->elfsect->shnum, 0);
+		s->elfsym = numelfsym++;
+
+		s = lookup("runtime.g", 0);
+		if(s->sect == nil) {
+			cursym = nil;
+			diag("missing section for %s", s->name);
+			errorexit();
+		}
+		putelfsyment(putelfstr(s->name), PtrSize, PtrSize, (STB_LOCAL<<4)|STT_TLS, s->sect->elfsect->shnum, 0);
+		s->elfsym = numelfsym++;
+	}
 
 	elfbind = STB_GLOBAL;
 	elfglobalsymndx = numelfsym;
 	genasmsym(putelfsym);
+	
+	for(s=allsym; s!=S; s=s->allsym) {
+		if(s->type != SHOSTOBJ)
+			continue;
+		putelfsyment(putelfstr(s->name), 0, 0, (STB_GLOBAL<<4)|STT_NOTYPE, 0, 0);
+		s->elfsym = numelfsym++;
+	}
 }
 
 static void
@@ -293,41 +361,76 @@ vputl(uint64 v)
 	lputl(v >> 32);
 }
 
+// Emit symbol table entry.
+// The table format is described at the top of ../../pkg/runtime/symtab.c.
 void
 putsymb(Sym *s, char *name, int t, vlong v, vlong size, int ver, Sym *typ)
 {
-	int i, f, l;
+	int i, f, c;
+	vlong v1;
 	Reloc *rel;
 
 	USED(size);
-	if(t == 'f')
-		name++;
-	l = 4;
-//	if(!debug['8'])
-//		l = 8;
+	
+	// type byte
+	if('A' <= t && t <= 'Z')
+		c = t - 'A' + (ver ? 26 : 0);
+	else if('a' <= t && t <= 'z')
+		c = t - 'a' + 26;
+	else {
+		diag("invalid symbol table type %c", t);
+		errorexit();
+		return;
+	}
+	
+	if(s != nil)
+		c |= 0x40; // wide value
+	if(typ != nil)
+		c |= 0x80; // has go type
+	scput(c);
+
+	// value
 	if(s != nil) {
+		// full width
 		rel = addrel(symt);
-		rel->siz = l;
+		rel->siz = PtrSize;
 		rel->sym = s;
 		rel->type = D_ADDR;
 		rel->off = symt->size;
-		v = 0;
+		if(PtrSize == 8)
+			slput(0);
+		slput(0);
+	} else {
+		// varint
+		if(v < 0) {
+			diag("negative value in symbol table: %s %lld", name, v);
+			errorexit();
+		}
+		v1 = v;
+		while(v1 >= 0x80) {
+			scput(v1 | 0x80);
+			v1 >>= 7;
+		}
+		scput(v1);
 	}
 
-	if(l == 8) {
-		if(slput == slputl) {
-			slputl(v);
-			slputl(v>>32);
-		} else {
-			slputb(v>>32);
-			slputb(v);
-		}
-	} else
-		slput(v);
-
-	if(ver)
-		t += 'a' - 'A';
-	scput(t+0x80);			/* 0x80 is variable length */
+	// go type if present
+	if(typ != nil) {
+		if(!typ->reachable)
+			diag("unreachable type %s", typ->name);
+		rel = addrel(symt);
+		rel->siz = PtrSize;
+		rel->sym = typ;
+		rel->type = D_ADDR;
+		rel->off = symt->size;
+		if(PtrSize == 8)
+			slput(0);
+		slput(0);
+	}
+	
+	// name	
+	if(t == 'f')
+		name++;
 
 	if(t == 'Z' || t == 'z') {
 		scput(name[0]);
@@ -337,24 +440,11 @@ putsymb(Sym *s, char *name, int t, vlong v, vlong size, int ver, Sym *typ)
 		}
 		scput(0);
 		scput(0);
-	}
-	else {
+	} else {
 		for(i=0; name[i]; i++)
 			scput(name[i]);
 		scput(0);
 	}
-	if(typ) {
-		if(!typ->reachable)
-			diag("unreachable type %s", typ->name);
-		rel = addrel(symt);
-		rel->siz = l;
-		rel->sym = typ;
-		rel->type = D_ADDR;
-		rel->off = symt->size;
-	}
-	if(l == 8)
-		slput(0);
-	slput(0);
 
 	if(debug['n']) {
 		if(t == 'z' || t == 'Z') {
@@ -367,9 +457,9 @@ putsymb(Sym *s, char *name, int t, vlong v, vlong size, int ver, Sym *typ)
 			return;
 		}
 		if(ver)
-			Bprint(&bso, "%c %.8llux %s<%d> %s\n", t, v, s->name, ver, typ ? typ->name : "");
+			Bprint(&bso, "%c %.8llux %s<%d> %s\n", t, v, name, ver, typ ? typ->name : "");
 		else
-			Bprint(&bso, "%c %.8llux %s %s\n", t, v, s->name, typ ? typ->name : "");
+			Bprint(&bso, "%c %.8llux %s %s\n", t, v, name, typ ? typ->name : "");
 	}
 }
 
@@ -387,10 +477,12 @@ symtab(void)
 	xdefine("etypelink", SRODATA, 0);
 	xdefine("rodata", SRODATA, 0);
 	xdefine("erodata", SRODATA, 0);
-	xdefine("gcdata", SGCDATA, 0);
-	xdefine("egcdata", SGCDATA, 0);
-	xdefine("gcbss", SGCBSS, 0);
-	xdefine("egcbss", SGCBSS, 0);
+	if(flag_shared) {
+		xdefine("datarelro", SDATARELRO, 0);
+		xdefine("edatarelro", SDATARELRO, 0);
+	}
+	xdefine("egcdata", STYPE, 0);
+	xdefine("egcbss", STYPE, 0);
 	xdefine("noptrdata", SNOPTRDATA, 0);
 	xdefine("enoptrdata", SNOPTRDATA, 0);
 	xdefine("data", SDATA, 0);
@@ -457,17 +549,20 @@ symtab(void)
 	case '5':
 	case '6':
 	case '8':
-		// magic entry to denote little-endian symbol table
-		slputl(0xfffffffe);
-		scput(0);
-		scput(0);
+		// little-endian symbol table
 		slput = slputl;
 		break;
 	case 'v':
-		// big-endian (in case one comes along)
+		// big-endian symbol table
 		slput = slputb;
 		break;
 	}
+	// new symbol table header.
+	slput(0xfffffffd);
+	scput(0);
+	scput(0);
+	scput(0);
+	scput(PtrSize);
 
 	genasmsym(putsymb);
 }

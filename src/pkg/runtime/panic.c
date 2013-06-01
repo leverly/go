@@ -5,6 +5,7 @@
 #include "runtime.h"
 #include "arch_GOARCH.h"
 #include "stack.h"
+#include "malloc.h"
 
 // Code related to defer, panic and recover.
 
@@ -119,7 +120,7 @@ freedefer(Defer *d)
 // functions that split the stack.
 #pragma textflag 7
 uintptr
-runtime·deferproc(int32 siz, byte* fn, ...)
+runtime·deferproc(int32 siz, FuncVal *fn, ...)
 {
 	Defer *d;
 
@@ -156,7 +157,8 @@ void
 runtime·deferreturn(uintptr arg0)
 {
 	Defer *d;
-	byte *argp, *fn;
+	byte *argp;
+	FuncVal *fn;
 
 	d = g->defer;
 	if(d == nil)
@@ -382,6 +384,11 @@ nomatch:
 void
 runtime·startpanic(void)
 {
+	if(runtime·mheap == 0 || runtime·mheap->cachealloc.size == 0) { // very early
+		runtime·printf("runtime: panic before malloc heap initialized\n");
+		m->mallocing = 1; // tell rest of panic not to try to malloc
+	} else if(m->mcache == nil) // can happen if called from signal handler or throw
+		m->mcache = runtime·allocmcache();
 	if(m->dying) {
 		runtime·printf("panic during panic\n");
 		runtime·exit(3);
@@ -395,12 +402,13 @@ void
 runtime·dopanic(int32 unused)
 {
 	static bool didothers;
+	bool crash;
 
 	if(g->sig != 0)
 		runtime·printf("[signal %x code=%p addr=%p pc=%p]\n",
 			g->sig, g->sigcode0, g->sigcode1, g->sigpc);
 
-	if(runtime·gotraceback()){
+	if(runtime·gotraceback(&crash)){
 		if(g != m->g0) {
 			runtime·printf("\n");
 			runtime·goroutineheader(g);
@@ -421,6 +429,9 @@ runtime·dopanic(int32 unused)
 		runtime·lock(&deadlock);
 		runtime·lock(&deadlock);
 	}
+	
+	if(crash)
+		runtime·crash();
 
 	runtime·exit(2);
 }
@@ -454,6 +465,8 @@ runtime·throwinit(void)
 void
 runtime·throw(int8 *s)
 {
+	if(m->throwing == 0)
+		m->throwing = 1;
 	runtime·startpanic();
 	runtime·printf("fatal error: %s\n", s);
 	runtime·dopanic(0);

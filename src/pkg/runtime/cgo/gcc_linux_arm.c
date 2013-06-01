@@ -16,9 +16,12 @@ static void *threadentry(void*);
 // Note: all three functions will clobber R0, and the last
 // two can be called from 5c ABI code.
 void __aeabi_read_tp(void) __attribute__((naked));
-void cgo_tls_set_gm(void) __attribute__((naked));
-void cgo_tls_get_gm(void) __attribute__((naked));
-void __aeabi_read_tp(void) {
+void x_cgo_save_gm(void) __attribute__((naked));
+void x_cgo_load_gm(void) __attribute__((naked));
+
+void
+__aeabi_read_tp(void)
+{
 	// b __kuser_get_tls @ 0xffff0fe0
 	__asm__ __volatile__ (
 		"mvn r0, #0xf000\n\t"
@@ -26,8 +29,11 @@ void __aeabi_read_tp(void) {
 		"nop\n\tnop\n\t"
 	);
 }
+
 // g (R10) at 8(TP), m (R9) at 12(TP)
-void cgo_tls_get_gm(void) {
+void
+x_cgo_load_gm(void)
+{
 	__asm__ __volatile__ (
 		"push {lr}\n\t"
 		"bl __aeabi_read_tp\n\t"
@@ -36,7 +42,10 @@ void cgo_tls_get_gm(void) {
 		"pop {pc}\n\t"
 	);
 }
-void cgo_tls_set_gm(void) {
+
+void
+x_cgo_save_gm(void)
+{
 	__asm__ __volatile__ (
 		"push {lr}\n\t"
 		"bl __aeabi_read_tp\n\t"
@@ -45,16 +54,13 @@ void cgo_tls_set_gm(void) {
 		"pop {pc}\n\t"
 	);
 }
-// both cgo_tls_{get,set}_gm can be called from runtime
-void (*cgo_load_gm)(void) = cgo_tls_get_gm;
-void (*cgo_save_gm)(void) = cgo_tls_set_gm;
 
-static void
-xinitcgo(G *g)
+void
+x_cgo_init(G *g)
 {
 	pthread_attr_t attr;
 	size_t size;
-	cgo_tls_set_gm(); // save g and m for the initial thread
+	x_cgo_save_gm(); // save g and m for the initial thread
 
 	pthread_attr_init(&attr);
 	pthread_attr_getstacksize(&attr, &size);
@@ -62,10 +68,9 @@ xinitcgo(G *g)
 	pthread_attr_destroy(&attr);
 }
 
-void (*initcgo)(G*) = xinitcgo;
 
 void
-libcgo_sys_thread_start(ThreadStart *ts)
+_cgo_sys_thread_start(ThreadStart *ts)
 {
 	pthread_attr_t attr;
 	pthread_t p;
@@ -99,7 +104,7 @@ threadentry(void *v)
 	ts.g->stackbase = (uintptr)&ts;
 
 	/*
-	 * libcgo_sys_thread_start set stackguard to stack size;
+	 * _cgo_sys_thread_start set stackguard to stack size;
 	 * change to actual guard pointer.
 	 */
 	ts.g->stackguard = (uintptr)&ts - ts.g->stackguard + 4096 * 2;

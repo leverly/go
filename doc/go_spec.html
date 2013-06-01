@@ -1,6 +1,6 @@
 <!--{
 	"Title": "The Go Programming Language Specification",
-	"Subtitle": "Version of January 18, 2013",
+	"Subtitle": "Version of May 8, 2013",
 	"Path": "/ref/spec"
 }-->
 
@@ -103,6 +103,7 @@ compiler may disallow the NUL character (U+0000) in the source text.
 Implementation restriction: For compatibility with other tools, a
 compiler may ignore a UTF-8-encoded byte order mark
 (U+FEFF) if it is the first Unicode code point in the source text.
+A byte order mark may be disallowed anywhere else in the source.
 </p>
 
 <h3 id="Characters">Characters</h3>
@@ -639,8 +640,8 @@ expressions</a>.
 <p>
 A type determines the set of values and operations specific to values of that
 type.  A type may be specified by a
-(possibly <a href="#Qualified_identifiers">qualified</a>) <i>type name</i>
-(§<a href="#Type_declarations">Type declarations</a>) or a <i>type literal</i>,
+(possibly <a href="#Qualified_identifiers">qualified</a>)
+<a href="#Type_declarations"><i>type name</i></a> or a <i>type literal</i>,
 which composes a new type from previously declared types.
 </p>
 
@@ -837,9 +838,9 @@ multi-dimensional types.
 <h3 id="Slice_types">Slice types</h3>
 
 <p>
-A slice is a reference to a contiguous segment of an array and
-contains a numbered sequence of elements from that array.  A slice
-type denotes the set of all slices of arrays of its element type.
+A slice is a descriptor for a contiguous segment of an array and
+provides access to a numbered sequence of elements from that array.
+A slice type denotes the set of all slices of arrays of its element type.
 The value of an uninitialized slice is <code>nil</code>.
 </p>
 
@@ -866,8 +867,8 @@ distinct arrays always represent distinct storage.
 The array underlying a slice may extend past the end of the slice.
 The <i>capacity</i> is a measure of that extent: it is the sum of
 the length of the slice and the length of the array beyond the slice;
-a slice of length up to that capacity can be created by `slicing' a new
-one from the original slice (§<a href="#Slices">Slices</a>).
+a slice of length up to that capacity can be created by
+<a href="#Slices"><i>slicing</i></a> a new one from the original slice.
 The capacity of a slice <code>a</code> can be discovered using the
 built-in function <a href="#Length_and_capacity"><code>cap(a)</code></a>.
 </p>
@@ -1236,8 +1237,8 @@ KeyType     = Type .
 </pre>
 
 <p>
-The comparison operators <code>==</code> and <code>!=</code>
-(§<a href="#Comparison_operators">Comparison operators</a>) must be fully defined
+The <a href="#Comparison_operators">comparison operators</a>
+<code>==</code> and <code>!=</code> must be fully defined
 for operands of the key type; thus the key type must not be a function, map, or
 slice.
 If the key type is an interface type, these
@@ -1469,12 +1470,13 @@ Any value may be assigned to the <a href="#Blank_identifier">blank identifier</a
 <h2 id="Blocks">Blocks</h2>
 
 <p>
-A <i>block</i> is a sequence of declarations and statements within matching
-brace brackets.
+A <i>block</i> is a possibly empty sequence of declarations and statements
+within matching brace brackets.
 </p>
 
 <pre class="ebnf">
-Block = "{" { Statement ";" } "}" .
+Block = "{" StatementList "}" .
+StatementList = { Statement ";" } .
 </pre>
 
 <p>
@@ -1490,10 +1492,13 @@ In addition to explicit blocks in the source code, there are implicit blocks:
 	<li>Each file has a <i>file block</i> containing all Go source text
 	    in that file.</li>
 
-	<li>Each <code>if</code>, <code>for</code>, and <code>switch</code>
+	<li>Each <a href="#If_statements">"if"</a>,
+	    <a href="#For_statements">"for"</a>, and
+	    <a href="#Switch_statements">"switch"</a>
 	    statement is considered to be in its own implicit block.</li>
 
-	<li>Each clause in a <code>switch</code> or <code>select</code> statement
+	<li>Each clause in a <a href="#Switch_statements">"switch"</a>
+	    or <a href="#Select_statements">"select"</a> statement
 	    acts as an implicit block.</li>
 </ol>
 
@@ -1567,8 +1572,9 @@ declarations.
 
 <p>
 Labels are declared by <a href="#Labeled_statements">labeled statements</a> and are
-used in the <code>break</code>, <code>continue</code>, and <code>goto</code>
-statements (§<a href="#Break_statements">Break statements</a>, §<a href="#Continue_statements">Continue statements</a>, §<a href="#Goto_statements">Goto statements</a>).
+used in the <a href="#Break_statements">"break"</a>,
+<a href="#Continue_statements">"continue"</a>, and
+<a href="#Goto_statements">"goto"</a> statements.
 It is illegal to define a label that is never used.
 In contrast to other identifiers, labels are not block scoped and do
 not conflict with identifiers that are not labels. The scope of a label
@@ -1868,7 +1874,7 @@ var _, found = entries[name]  // map lookup; only interested in "found"
 
 <p>
 If a list of expressions is given, the variables are initialized
-by assigning the expressions to the variables (§<a href="#Assignments">Assignments</a>)
+by <a href="#Assignments">assigning</a> the expressions to the variables
 in order; all expressions must be consumed and all variables initialized from them.
 Otherwise, each variable is initialized to its <a href="#The_zero_value">zero value</a>.
 </p>
@@ -1935,9 +1941,11 @@ a, a := 1, 2                              // illegal: double declaration of a or
 
 <p>
 Short variable declarations may appear only inside functions.
-In some contexts such as the initializers for <code>if</code>,
-<code>for</code>, or <code>switch</code> statements,
-they can be used to declare local temporary variables (§<a href="#Statements">Statements</a>).
+In some contexts such as the initializers for
+<a href="#If_statements">"if"</a>,
+<a href="#For_statements">"for"</a>, or
+<a href="#Switch_statements">"switch"</a> statements,
+they can be used to declare local temporary variables.
 </p>
 
 <h3 id="Function_declarations">Function declarations</h3>
@@ -1948,9 +1956,27 @@ to a function.
 </p>
 
 <pre class="ebnf">
-FunctionDecl = "func" FunctionName Signature [ Body ] .
+FunctionDecl = "func" FunctionName ( Function | Signature ) .
 FunctionName = identifier .
-Body         = Block .
+Function     = Signature FunctionBody .
+FunctionBody = Block .
+</pre>
+
+<p>
+If the function's <a href="#Function_types">signature</a> declares
+result parameters, the function body's statement list must end in
+a <a href="#Terminating_statements">terminating statement</a>.
+</p>
+
+<pre>
+func findMarker(c <-chan int) int {
+	for i := range c {
+		if x := <-c; isMarker(x) {
+			return x
+		}
+	}
+	// invalid: missing return statement.
+}
 </pre>
 
 <p>
@@ -1972,13 +1998,13 @@ func flushICache(begin, end uintptr)  // implemented externally
 <h3 id="Method_declarations">Method declarations</h3>
 
 <p>
-A method is a function with a <i>receiver</i>.
-A method declaration binds an identifier, the <i>method name</i>, to a method.
-It also associates the method with the receiver's <i>base type</i>.
+A method is a <a href="#Function_declarations">function</a> with a <i>receiver</i>.
+A method declaration binds an identifier, the <i>method name</i>, to a method,
+and associates the method with the receiver's <i>base type</i>.
 </p>
 
 <pre class="ebnf">
-MethodDecl   = "func" Receiver MethodName Signature [ Body ] .
+MethodDecl   = "func" Receiver MethodName ( Function | Signature ) .
 Receiver     = "(" [ identifier ] [ "*" ] BaseTypeName ")" .
 BaseTypeName = identifier .
 </pre>
@@ -2185,7 +2211,7 @@ For array and slice literals the following rules apply:
 </ul>
 
 <p>
-Taking the address of a composite literal (§<a href="#Address_operators">Address operators</a>)
+<a href="#Address_operators">Taking the address</a> of a composite literal
 generates a pointer to a unique instance of the literal's value.
 </p>
 <pre>
@@ -2284,12 +2310,11 @@ noteFrequency := map[string]float32{
 <h3 id="Function_literals">Function literals</h3>
 
 <p>
-A function literal represents an anonymous function.
-It consists of a specification of the function type and a function body.
+A function literal represents an anonymous <a href="#Function_declarations">function</a>.
 </p>
 
 <pre class="ebnf">
-FunctionLit = FunctionType Body .
+FunctionLit = "func" Function .
 </pre>
 
 <pre>
@@ -2414,8 +2439,15 @@ expression is illegal.
 In all other cases, <code>x.f</code> is illegal.
 </li>
 <li>
-If <code>x</code> is of pointer or interface type and has the value
-<code>nil</code>, assigning to, evaluating, or calling <code>x.f</code>
+If <code>x</code> is of pointer type and has the value
+<code>nil</code> and <code>x.f</code> denotes a struct field,
+assigning to or evaluating <code>x.f</code>
+causes a <a href="#Run_time_panics">run-time panic</a>.
+</li>
+<li>
+If <code>x</code> is of interface type and has the value
+<code>nil</code>, <a href="#Calls">calling</a> or
+<a href="#Method_values">evaluating</a> the method <code>x.f</code>
 causes a <a href="#Run_time_panics">run-time panic</a>.
 </li>
 </ol>
@@ -2503,10 +2535,11 @@ rules apply:
 If <code>a</code> is not a map:
 </p>
 <ul>
-	<li>the index <code>x</code> must be an integer value; it is <i>in range</i> if <code>0 &lt;= x &lt; len(a)</code>,
+	<li>the index <code>x</code> must be of integer type or untyped;
+	    it is <i>in range</i> if <code>0 &lt;= x &lt; len(a)</code>,
 	    otherwise it is <i>out of range</i></li>
 	<li>a <a href="#Constants">constant</a> index must be non-negative
-	     and representable by a value of type <code>int</code>
+	    and representable by a value of type <code>int</code>
 </ul>
 
 <p>
@@ -2518,7 +2551,7 @@ where <code>A</code> is an <a href="#Array_types">array type</a>:
 	<li>if <code>a</code> is <code>nil</code> or if <code>x</code> is out of range at run time,
 	    a <a href="#Run_time_panics">run-time panic</a> occurs</li>
 	<li><code>a[x]</code> is the array element at index <code>x</code> and the type of
-	  <code>a[x]</code> is the element type of <code>A</code></li>
+	    <code>a[x]</code> is the element type of <code>A</code></li>
 </ul>
 
 <p>
@@ -2528,7 +2561,7 @@ For <code>a</code> of type <code>S</code> where <code>S</code> is a <a href="#Sl
 	<li>if the slice is <code>nil</code> or if <code>x</code> is out of range at run time,
 	    a <a href="#Run_time_panics">run-time panic</a> occurs</li>
 	<li><code>a[x]</code> is the slice element at index <code>x</code> and the type of
-	  <code>a[x]</code> is the element type of <code>S</code></li>
+	    <code>a[x]</code> is the element type of <code>S</code></li>
 </ul>
 
 <p>
@@ -2541,7 +2574,7 @@ where <code>T</code> is a <a href="#String_types">string type</a>:
 	<li>if <code>x</code> is out of range at run time,
 	    a <a href="#Run_time_panics">run-time panic</a> occurs</li>
 	<li><code>a[x]</code> is the byte at index <code>x</code> and the type of
-	  <code>a[x]</code> is <code>byte</code></li>
+	    <code>a[x]</code> is <code>byte</code></li>
 	<li><code>a[x]</code> may not be assigned to</li>
 </ul>
 
@@ -2551,14 +2584,14 @@ where <code>M</code> is a <a href="#Map_types">map type</a>:
 </p>
 <ul>
 	<li><code>x</code>'s type must be
-	<a href="#Assignability">assignable</a>
-	to the key type of <code>M</code></li>
+	    <a href="#Assignability">assignable</a>
+	    to the key type of <code>M</code></li>
 	<li>if the map contains an entry with key <code>x</code>,
-	  <code>a[x]</code> is the map value with key <code>x</code>
-	  and the type of <code>a[x]</code> is the value type of <code>M</code></li>
+	    <code>a[x]</code> is the map value with key <code>x</code>
+	    and the type of <code>a[x]</code> is the value type of <code>M</code></li>
 	<li>if the map is <code>nil</code> or does not contain such an entry,
-	  <code>a[x]</code> is the <a href="#The_zero_value">zero value</a>
-	  for the value type of <code>M</code></li>
+	    <code>a[x]</code> is the <a href="#The_zero_value">zero value</a>
+	    for the value type of <code>M</code></li>
 </ul>
 
 <p>
@@ -2637,7 +2670,7 @@ a[:]   // same as a[0 : len(a)]
 
 <p>
 For arrays or strings, the indices <code>low</code> and <code>high</code> are
-<i>in range</i> if <code>0 &lt;= <code>low</code> &lt;= <code>high</code> &lt;= len(a)</code>,
+<i>in range</i> if <code>0</code> &lt;= <code>low</code> &lt;= <code>high</code> &lt;= <code>len(a)</code>,
 otherwise they are <i>out of range</i>.
 For slices, the upper index bound is the slice capacity <code>cap(a)</code> rather than the length.
 A <a href="#Constants">constant</a> index must be non-negative and representable by a value of type
@@ -2765,13 +2798,14 @@ causes a <a href="#Run_time_panics">run-time panic</a>.
 </p>
 
 <p>
-As a special case, if the return parameters of a function or method
+As a special case, if the return values of a function or method
 <code>g</code> are equal in number and individually
 assignable to the parameters of another function or method
 <code>f</code>, then the call <code>f(g(<i>parameters_of_g</i>))</code>
 will invoke <code>f</code> after binding the return values of
 <code>g</code> to the parameters of <code>f</code> in order.  The call
-of <code>f</code> must contain no parameters other than the call of <code>g</code>.
+of <code>f</code> must contain no parameters other than the call of <code>g</code>,
+and <code>g</code> must have at least one return value.
 If <code>f</code> has a final <code>...</code> parameter, it is
 assigned the return values of <code>g</code> that remain after
 assignment of regular parameters.
@@ -2893,9 +2927,7 @@ The right operand in a shift expression must have unsigned integer type
 or be an untyped constant that can be converted to unsigned integer type.
 If the left operand of a non-constant shift expression is an untyped constant,
 the type of the constant is what it would be if the shift expression were
-replaced by its left operand alone; the type is <code>int</code> if it cannot
-be determined from the context (for instance, if the shift expression is an
-operand in a comparison against an untyped constant).
+replaced by its left operand alone.
 </p>
 
 <pre>
@@ -2904,10 +2936,12 @@ var i = 1&lt;&lt;s           // 1 has type int
 var j int32 = 1&lt;&lt;s     // 1 has type int32; j == 0
 var k = uint64(1&lt;&lt;s)   // 1 has type uint64; k == 1&lt;&lt;33
 var m int = 1.0&lt;&lt;s     // 1.0 has type int
-var n = 1.0&lt;&lt;s != 0    // 1.0 has type int; n == false if ints are 32bits in size
+var n = 1.0&lt;&lt;s != i    // 1.0 has type int; n == false if ints are 32bits in size
 var o = 1&lt;&lt;s == 2&lt;&lt;s   // 1 and 2 have type int; o == true if ints are 32bits in size
 var p = 1&lt;&lt;s == 1&lt;&lt;33  // illegal if ints are 32bits in size: 1 has type int, but 1&lt;&lt;33 overflows int
 var u = 1.0&lt;&lt;s         // illegal: 1.0 has type float64, cannot shift
+var u1 = 1.0&lt;&lt;s != 0   // illegal: 1.0 has type float64, cannot shift
+var u2 = 1&lt;&lt;s != 1.0   // illegal: 1 has type float64, cannot shift
 var v float32 = 1&lt;&lt;s   // illegal: 1 has type float32, cannot shift
 var w int64 = 1.0&lt;&lt;33  // 1.0&lt;&lt;33 is a constant shift expression
 </pre>
@@ -3079,8 +3113,8 @@ occurs is implementation-specific.
 For unsigned integer values, the operations <code>+</code>,
 <code>-</code>, <code>*</code>, and <code>&lt;&lt;</code> are
 computed modulo 2<sup><i>n</i></sup>, where <i>n</i> is the bit width of
-the unsigned integer's type
-(§<a href="#Numeric_types">Numeric types</a>). Loosely speaking, these unsigned integer operations
+the <a href="#Numeric_types">unsigned integer</a>'s type.
+Loosely speaking, these unsigned integer operations
 discard high bits upon overflow, and programs may rely on ``wrap around''.
 </p>
 <p>
@@ -3097,7 +3131,7 @@ not occur. For instance, it may not assume that <code>x &lt; x + 1</code> is alw
 <h3 id="Comparison_operators">Comparison operators</h3>
 
 <p>
-Comparison operators compare two operands and yield a boolean value.
+Comparison operators compare two operands and yield an untyped boolean value.
 </p>
 
 <pre class="grammar">
@@ -3157,8 +3191,8 @@ These terms and the result of the comparisons are defined as follows:
 
 	<li>
 	Channel values are comparable.
-	Two channel values are equal if they were created by the same call to <code>make</code>
-	(§<a href="#Making_slices_maps_and_channels">Making slices, maps, and channels</a>)
+	Two channel values are equal if they were created by the same call to
+	<a href="#Making_slices_maps_and_channels"><code>make</code></a>
 	or if both have value <code>nil</code>.
 	</li>
 
@@ -3205,20 +3239,17 @@ Comparison of pointer, channel, and interface values to <code>nil</code>
 is also allowed and follows from the general rules above.
 </p>
 
-<p>
-The result of a comparison can be assigned to any boolean type.
-If the context does not demand a specific boolean type,
-the result has type <code>bool</code>.
-</p>
-
 <pre>
-type MyBool bool
+const c = 3 < 4            // c is the untyped bool constant true
 
+type MyBool bool
 var x, y int
 var (
-	b1 MyBool = x == y // result of comparison has type MyBool
-	b2 bool   = x == y // result of comparison has type bool
-	b3        = x == y // result of comparison has type bool
+	// The result of a comparison is an untyped bool.
+	// The usual assignment rules apply.
+	b3        = x == y // b3 has type bool
+	b4 bool   = x == y // b4 has type bool
+	b5 MyBool = x == y // b5 has type MyBool
 )
 </pre>
 
@@ -3340,6 +3371,7 @@ type T struct {
 }
 func (tv  T) Mv(a int) int         { return 0 }  // value receiver
 func (tp *T) Mp(f float32) float32 { return 1 }  // pointer receiver
+
 var t T
 </pre>
 
@@ -3425,13 +3457,119 @@ the receiver is provided as the first argument to the call.
 That is, given <code>f := T.Mv</code>, <code>f</code> is invoked
 as <code>f(t, 7)</code> not <code>t.f(7)</code>.
 To construct a function that binds the receiver, use a
-<a href="#Function_literals">closure</a>.
+<a href="#Function_literals">function literal</a> or
+<a href="#Method_values">method value</a>.
 </p>
 
 <p>
 It is legal to derive a function value from a method of an interface type.
 The resulting function takes an explicit receiver of that interface type.
 </p>
+
+<h3 id="Method_values">Method values</h3>
+
+<p>
+If the expression <code>x</code> has static type <code>T</code> and
+<code>M</code> is in the <a href="#Method_sets">method set</a> of type <code>T</code>,
+<code>x.M</code> is called a <i>method value</i>.
+The method value <code>x.M</code> is a function value that is callable
+with the same arguments as a method call of <code>x.M</code>.
+The expression <code>x</code> is evaluated and saved during the evaluation of the
+method value; the saved copy is then used as the receiver in any calls,
+which may be executed later.
+</p>
+
+<p>
+The type <code>T</code> may be an interface or non-interface type.
+</p>
+
+<p>
+As in the discussion of <a href="#Method_expressions">method expressions</a> above,
+consider a struct type <code>T</code> with two methods,
+<code>Mv</code>, whose receiver is of type <code>T</code>, and
+<code>Mp</code>, whose receiver is of type <code>*T</code>.
+</p>
+
+<pre>
+type T struct {
+	a int
+}
+func (tv  T) Mv(a int) int         { return 0 }  // value receiver
+func (tp *T) Mp(f float32) float32 { return 1 }  // pointer receiver
+
+var t T
+var pt *T
+func makeT() T
+</pre>
+
+<p>
+The expression
+</p>
+
+<pre>
+t.Mv
+</pre>
+
+<p>
+yields a function value of type
+</p>
+
+<pre>
+func(int) int
+</pre>
+
+<p>
+These two invocations are equivalent:
+</p>
+
+<pre>
+t.Mv(7)
+f := t.Mv; f(7)
+</pre>
+
+<p>
+Similarly, the expression
+</p>
+
+<pre>
+pt.Mp
+</pre>
+
+<p>
+yields a function value of type
+</p>
+
+<pre>
+func(float32) float32
+</pre>
+
+<p>
+As with <a href="#Selectors">selectors</a>, a reference to a non-interface method with a value receiver
+using a pointer will automatically dereference that pointer: <code>pt.Mv</code> is equivalent to <code>(*pt).Mv</code>.
+</p>
+
+<p>
+As with <a href="#Calls">method calls</a>, a reference to a non-interface method with a pointer receiver
+using an addressable value will automatically take the address of that value: <code>t.Mv</code> is equivalent to <code>(&amp;t).Mv</code>.
+</p>
+
+<pre>
+f := t.Mv; f(7)   // like t.Mv(7)
+f := pt.Mp; f(7)  // like pt.Mp(7)
+f := pt.Mv; f(7)  // like (*pt).Mv(7)
+f := t.Mp; f(7)   // like (&amp;t).Mp(7)
+f := makeT().Mp   // invalid: result of makeT() is not addressable
+</pre>
+
+<p>
+Although the examples above use non-interface types, it is also legal to create a method value
+from a value of interface type.
+</p>
+
+<pre>
+var i interface { M(int) } = myVal
+f := i.M; f(7)  // like i.M(7)
+</pre>
 
 <h3 id="Conversions">Conversions</h3>
 
@@ -3447,16 +3585,20 @@ Conversion = Type "(" Expression [ "," ] ")" .
 
 <p>
 If the type starts with the operator <code>*</code> or <code>&lt;-</code>,
-or the keyword <code>func</code>, it must be parenthesized:
+or if the type starts with the keyword <code>func</code>
+and has no result list, it must be parenthesized when
+necessary to avoid ambiguity:
 </p>
 
 <pre>
 *Point(p)        // same as *(Point(p))
-(*Point)(p)      // p is converted to (*Point)
+(*Point)(p)      // p is converted to *Point
 &lt;-chan int(c)    // same as &lt;-(chan int(c))
-(&lt;-chan int)(c)  // c is converted to (&lt;-chan int)
+(&lt;-chan int)(c)  // c is converted to &lt;-chan int
 func()(x)        // function signature func() x
-(func())(x)      // x is converted to (func())
+(func())(x)      // x is converted to func()
+(func() int)(x)  // x is converted to func() int
+func() int(x)    // x is converted to func() int (unambiguous)
 </pre>
 
 <p>
@@ -3469,10 +3611,18 @@ type <code>T</code> in any of these cases:
 	<code>x</code> is representable by a value of type <code>T</code>.
 	</li>
 	<li>
+	<code>x</code> is a floating-point constant,
+	<code>T</code> is a floating-point type,
+	and <code>x</code> is representable by a value
+	of type <code>T</code> after rounding using
+	IEEE 754 round-to-even rules.
+	The constant <code>T(x)</code> is the rounded value.
+	</li>
+	<li>
 	<code>x</code> is an integer constant and <code>T</code> is a
 	<a href="#String_types">string type</a>.
-	The same rule as for non-constant <code>x</code> applies in this case
-	(§<a href="#Conversions_to_and_from_a_string_type">Conversions to and from a string type</a>).
+	The <a href="#Conversions_to_and_from_a_string_type">same rule</a>
+	as for non-constant <code>x</code> applies in this case.
 	</li>
 </ul>
 
@@ -3484,6 +3634,7 @@ Converting a constant yields a typed constant as result.
 uint(iota)               // iota value of type uint
 float32(2.718281828)     // 2.718281828 of type float32
 complex128(1)            // 1.0 + 0.0i of type complex128
+float32(0.49999999)      // 0.5 of type float32
 string('x')              // "x" of type string
 string(0x266c)           // "♬" of type string
 MyString("foo" + "bar")  // "foobar" of type MyString
@@ -3541,12 +3692,6 @@ There is no linguistic mechanism to convert between pointers and integers.
 The package <a href="#Package_unsafe"><code>unsafe</code></a>
 implements this functionality under
 restricted circumstances.
-</p>
-
-<p>
-Implementation restriction: For backward-compatibility with the Go 1 language
-specification, a compiler may accept non-parenthesized literal function types
-in conversions where the syntax is unambiguous.
 </p>
 
 <h4>Conversions between numeric types</h4>
@@ -3675,8 +3820,8 @@ A constant <a href="#Comparison_operators">comparison</a> always yields
 an untyped boolean constant.  If the left operand of a constant
 <a href="#Operators">shift expression</a> is an untyped constant, the
 result is an integer constant; otherwise it is a constant of the same
-type as the left operand, which must be of integer type
-(§<a href="#Arithmetic_operators">Arithmetic operators</a>).
+type as the left operand, which must be of
+<a href="#Numeric_types">integer type</a>.
 Applying all other operators to untyped constants results in an untyped
 constant of the same kind (that is, a boolean, integer, floating-point,
 complex, or string constant).
@@ -3690,7 +3835,7 @@ const Θ float64 = 3/2      // Θ == 1.0   (type float64, 3/2 is integer divisio
 const Π float64 = 3/2.     // Π == 1.5   (type float64, 3/2. is float division)
 const d = 1 &lt;&lt; 3.0         // d == 8     (untyped integer constant)
 const e = 1.0 &lt;&lt; 3         // e == 8     (untyped integer constant)
-const f = int32(1) &lt;&lt; 33   // f == 0     (type int32)
+const f = int32(1) &lt;&lt; 33   // illegal    (constant 8589934592 overflows int32)
 const g = float64(2) &gt;&gt; 1  // illegal    (float64(2) is a typed floating-point constant)
 const h = "foo" &gt; "bar"    // h == true  (untyped boolean constant)
 const j = true             // j == true  (untyped boolean constant)
@@ -3834,6 +3979,84 @@ Statement =
 
 SimpleStmt = EmptyStmt | ExpressionStmt | SendStmt | IncDecStmt | Assignment | ShortVarDecl .
 </pre>
+
+<h3 id="Terminating_statements">Terminating statements</h3>
+
+<p>
+A terminating statement is one of the following:
+</p>
+
+<ol>
+<li>
+	A <a href="#Return_statements">"return"</a> or
+    	<a href="#Goto_statements">"goto"</a> statement.
+	<!-- ul below only for regular layout -->
+	<ul> </ul>
+</li>
+
+<li>
+	A call to the built-in function
+	<a href="#Handling_panics"><code>panic</code></a>.
+	<!-- ul below only for regular layout -->
+	<ul> </ul>
+</li>
+
+<li>
+	A <a href="#Blocks">block</a> in which the statement list ends in a terminating statement.
+	<!-- ul below only for regular layout -->
+	<ul> </ul>
+</li>
+
+<li>
+	An <a href="#If_statements">"if" statement</a> in which:
+	<ul>
+	<li>the "else" branch is present, and</li>
+	<li>both branches are terminating statements.</li>
+	</ul>
+</li>
+
+<li>
+	A <a href="#For_statements">"for" statement</a> in which:
+	<ul>
+	<li>there are no "break" statements referring to the "for" statement, and</li>
+	<li>the loop condition is absent.</li>
+	</ul>
+</li>
+
+<li>
+	A <a href="#Switch_statements">"switch" statement</a> in which:
+	<ul>
+	<li>there are no "break" statements referring to the "switch" statement,</li>
+	<li>there is a default case, and</li>
+	<li>the statement lists in each case, including the default, end in a terminating
+	    statement, or a possibly labeled <a href="#Fallthrough_statements">"fallthrough"
+	    statement</a>.</li>
+	</ul>
+</li>
+
+<li>
+	A <a href="#Select_statements">"select" statement</a> in which:
+	<ul>
+	<li>there are no "break" statements referring to the "select" statement, and</li>
+	<li>the statement lists in each case, including the default if present,
+	    end in a terminating statement.</li>
+	</ul>
+</li>
+
+<li>
+	A <a href="#Labeled_statements">labeled statement</a> labeling
+	a terminating statement.
+</li>
+</ol>
+
+<p>
+All other statements are not terminating.
+</p>
+
+<p>
+A <a href="#Blocks">statement list</a> ends in a terminating statement if the list
+is not empty and its final statement is terminating.
+</p>
 
 
 <h3 id="Empty_statements">Empty statements</h3>
@@ -4141,17 +4364,19 @@ the expression <code>true</code>.
 
 <pre class="ebnf">
 ExprSwitchStmt = "switch" [ SimpleStmt ";" ] [ Expression ] "{" { ExprCaseClause } "}" .
-ExprCaseClause = ExprSwitchCase ":" { Statement ";" } .
+ExprCaseClause = ExprSwitchCase ":" StatementList .
 ExprSwitchCase = "case" ExpressionList | "default" .
 </pre>
 
 <p>
-In a case or default clause,
-the last statement only may be a "fallthrough" statement
-(§<a href="#Fallthrough_statements">Fallthrough statement</a>) to
+In a case or default clause, the last non-empty statement
+may be a (possibly <a href="#Labeled_statements">labeled</a>)
+<a href="#Fallthrough_statements">"fallthrough" statement</a> to
 indicate that control should flow from the end of this clause to
 the first statement of the next clause.
 Otherwise control flows to the end of the "switch" statement.
+A "fallthrough" statement may appear as the last statement of all
+but the last clause of an expression switch.
 </p>
 
 <p>
@@ -4203,7 +4428,7 @@ expression <code>x</code>. As with type assertions, <code>x</code> must be of
 <pre class="ebnf">
 TypeSwitchStmt  = "switch" [ SimpleStmt ";" ] TypeSwitchGuard "{" { TypeCaseClause } "}" .
 TypeSwitchGuard = [ identifier ":=" ] PrimaryExpr "." "(" "type" ")" .
-TypeCaseClause  = TypeSwitchCase ":" { Statement ";" } .
+TypeCaseClause  = TypeSwitchCase ":" StatementList .
 TypeSwitchCase  = "case" TypeList | "default" .
 TypeList        = Type { "," Type } .
 </pre>
@@ -4219,8 +4444,7 @@ in the TypeSwitchGuard.
 </p>
 
 <p>
-The type in a case may be <code>nil</code>
-(§<a href="#Predeclared_identifiers">Predeclared identifiers</a>);
+The type in a case may be <a href="#Predeclared_identifiers"><code>nil</code></a>;
 that case is used when the expression in the TypeSwitchGuard
 is a <code>nil</code> interface value.
 </p>
@@ -4369,9 +4593,15 @@ the range clause is equivalent to the same clause with only the first variable p
 </p>
 
 <p>
-The range expression is evaluated once before beginning the loop
-except if the expression is an array, in which case, depending on
-the expression, it might not be evaluated (see below).
+The range expression is evaluated once before beginning the loop,
+with one exception. If the range expression is an array or a pointer to an array
+and only the first iteration value is present, only the range expression's
+length is evaluated; if that length is constant
+<a href="#Length_and_capacity">by definition</a>,
+the range expression itself will not be evaluated.
+</p>
+
+<p>
 Function calls on the left are evaluated once per iteration.
 For each iteration, iteration values are produced as follows:
 </p>
@@ -4388,8 +4618,8 @@ channel         c  chan E, &lt;-chan E       element  e  E
 <ol>
 <li>
 For an array, pointer to array, or slice value <code>a</code>, the index iteration
-values are produced in increasing order, starting at element index 0. As a special
-case, if only the first iteration variable is present, the range loop produces
+values are produced in increasing order, starting at element index 0.
+If only the first iteration variable is present, the range loop produces
 iteration values from 0 up to <code>len(a)</code> and does not index into the array
 or slice itself. For a <code>nil</code> slice, the number of iterations is 0.
 </li>
@@ -4520,7 +4750,7 @@ cases all referring to communication operations.
 
 <pre class="ebnf">
 SelectStmt = "select" "{" { CommClause } "}" .
-CommClause = CommCase ":" { Statement ";" } .
+CommClause = CommCase ":" StatementList .
 CommCase   = "case" ( SendStmt | RecvStmt ) | "default" .
 RecvStmt   = [ ExpressionList "=" | IdentifierList ":=" ] RecvExpr .
 RecvExpr   = Expression .
@@ -4645,7 +4875,7 @@ func complexF2() (re float64, im float64) {
 </pre>
 	</li>
 	<li>The expression list may be empty if the function's result
-		type specifies names for its result parameters (§<a href="#Function_types">Function types</a>).
+		type specifies names for its <a href="#Function_types">result parameters</a>.
 		The result parameters act as ordinary local variables
 		and the function may assign values to them as necessary.
 		The "return" statement returns the values of these variables.
@@ -4665,8 +4895,8 @@ func (devnull) Write(p []byte) (n int, _ error) {
 </ol>
 
 <p>
-Regardless of how they are declared, all the result values are initialized to the zero
-values for their type (§<a href="#The_zero_value">The zero value</a>) upon entry to the
+Regardless of how they are declared, all the result values are initialized to
+the <a href="#The_zero_value">zero values</a> for their type upon entry to the
 function. A "return" statement that specifies results sets the result parameters before
 any deferred functions are executed.
 </p>
@@ -4683,7 +4913,9 @@ TODO: Define when return is required.<br />
 
 <p>
 A "break" statement terminates execution of the innermost
-"for", "switch" or "select" statement.
+<a href="#For_statements">"for"</a>,
+<a href="#Switch_statements">"switch"</a>, or
+<a href="#Select_statements">"select"</a> statement.
 </p>
 
 <pre class="ebnf">
@@ -4692,10 +4924,8 @@ BreakStmt = "break" [ Label ] .
 
 <p>
 If there is a label, it must be that of an enclosing
-"for", "switch" or "select" statement, and that is the one whose execution
-terminates
-(§<a href="#For_statements">For statements</a>, §<a href="#Switch_statements">Switch statements</a>,
-§<a href="#Select_statements">Select statements</a>).
+"for", "switch", or "select" statement,
+and that is the one whose execution terminates.
 </p>
 
 <pre>
@@ -4712,7 +4942,7 @@ L:
 
 <p>
 A "continue" statement begins the next iteration of the
-innermost "for" loop at its post statement (§<a href="#For_statements">For statements</a>).
+innermost <a href="#For_statements">"for" loop</a> at its post statement.
 </p>
 
 <pre class="ebnf">
@@ -4722,8 +4952,7 @@ ContinueStmt = "continue" [ Label ] .
 <p>
 If there is a label, it must be that of an enclosing
 "for" statement, and that is the one whose execution
-advances
-(§<a href="#For_statements">For statements</a>).
+advances.
 </p>
 
 <h3 id="Goto_statements">Goto statements</h3>
@@ -4784,9 +5013,8 @@ the "for" statement's block but the <code>goto</code> is not.
 
 <p>
 A "fallthrough" statement transfers control to the first statement of the
-next case clause in a expression "switch" statement (§<a href="#Expression_switches">Expression switches</a>). It may
-be used only as the final non-empty statement in a case or default clause in an
-expression "switch" statement.
+next case clause in a <a href="#Expression_switches">expression "switch" statement</a>.
+It may be used only as the final non-empty statement in such a clause.
 </p>
 
 <pre class="ebnf">
@@ -4922,7 +5150,8 @@ At any time the following relationship holds:
 </pre>
 
 <p>
-The length and capacity of a <code>nil</code> slice, map, or channel are 0.
+The length of a <code>nil</code> slice, map or channel is 0.
+The capacity of a <code>nil</code> slice and channel is 0.
 </p>
 
 <p>
@@ -4942,8 +5171,8 @@ constant and <code>s</code> is evaluated.
 <p>
 The built-in function <code>new</code> takes a type <code>T</code> and
 returns a value of type <code>*T</code>.
-The memory is initialized as described in the section on initial values
-(§<a href="#The_zero_value">The zero value</a>).
+The memory is initialized as described in the section on
+<a href="#The_zero_value">initial values</a>.
 </p>
 
 <pre class="grammar">
@@ -4969,14 +5198,12 @@ of the memory.
 <h3 id="Making_slices_maps_and_channels">Making slices, maps and channels</h3>
 
 <p>
-Slices, maps and channels are reference types that do not require the
-extra indirection of an allocation with <code>new</code>.
 The built-in function <code>make</code> takes a type <code>T</code>,
 which must be a slice, map or channel type,
 optionally followed by a type-specific list of expressions.
 It returns a value of type <code>T</code> (not <code>*T</code>).
-The memory is initialized as described in the section on initial values
-(§<a href="#The_zero_value">The zero value</a>).
+The memory is initialized as described in the section on
+<a href="#The_zero_value">initial values</a>.
 </p>
 
 <pre class="grammar">
@@ -4994,7 +5221,7 @@ make(T, n)       channel    asynchronous channel of type T, buffer size n
 
 
 <p>
-The size arguments <code>n</code> and <code>m</code> must be integer values.
+The size arguments <code>n</code> and <code>m</code> must be of integer type or untyped.
 A <a href="#Constants">constant</a> size argument must be non-negative and
 representable by a value of type <code>int</code>.
 If both <code>n</code> and <code>m</code> are provided and are constant, then
@@ -5007,7 +5234,7 @@ a <a href="#Run_time_panics">run-time panic</a> occurs.
 s := make([]int, 10, 100)       // slice with len(s) == 10, cap(s) == 100
 s := make([]int, 1e3)           // slice with len(s) == cap(s) == 1000
 s := make([]int, 1&lt;&lt;63)         // illegal: len(s) is not representable by a value of type int
-s := make([]int, 10, 0)	        // illegal: len(s) > cap(s)
+s := make([]int, 10, 0)         // illegal: len(s) > cap(s)
 c := make(chan int, 10)         // channel with a buffer size of 10
 m := make(map[string]int, 100)  // map with initial space for 100 elements
 </pre>
@@ -5168,14 +5395,14 @@ func recover() interface{}
 </pre>
 
 <p>
-A <code>panic</code> call in a function <code>F</code> terminates the execution
-of <code>F</code>.
+While executing a function <code>F</code>,
+an explicit call to <code>panic</code> or a <a href="#Run_time_panics">run-time panic</a>
+terminates the execution of <code>F</code>.
 Any functions <a href="#Defer_statements">deferred</a> by <code>F</code>
-are executed before <code>F</code> returns to its caller. To the caller,
-the call of <code>F</code> then behaves itself like a call to <code>panic</code>,
-terminating its own execution and running deferred functions in the same manner.
-This continues until all functions in the goroutine have ceased execution,
-in reverse order. At that point, the program is terminated and the error
+are then executed as usual.
+Next, any deferred functions run by <code>F's</code> caller are run,
+and so on up to any deferred by the top-level function in the executing goroutine.
+At that point, the program is terminated and the error
 condition is reported, including the value of the argument to <code>panic</code>.
 This termination sequence is called <i>panicking</i>.
 </p>
@@ -5188,15 +5415,34 @@ panic(Error("cannot parse"))
 
 <p>
 The <code>recover</code> function allows a program to manage behavior
-of a panicking goroutine.  Executing a <code>recover</code> call
-<i>inside</i> a deferred function (but not any function called by it) stops
-the panicking sequence by restoring normal execution, and retrieves
-the error value passed to the call of <code>panic</code>.  If
-<code>recover</code> is called outside the deferred function it will
-not stop a panicking sequence.  In this case, or when the goroutine
-is not panicking, or if the argument supplied to <code>panic</code>
-was <code>nil</code>, <code>recover</code> returns <code>nil</code>.
+of a panicking goroutine.
+Suppose a function <code>G</code> defers a function <code>D</code> that calls
+<code>recover</code> and a panic occurs in a function on the same goroutine in which <code>G</code>
+is executing.
+When the running of deferred functions reaches <code>D</code>,
+the return value of <code>D</code>'s call to <code>recover</code> will be the value passed to the call of <code>panic</code>.
+If <code>D</code> returns normally, without starting a new
+<code>panic</code>, the panicking sequence stops. In that case,
+the state of functions called between <code>G</code> and the call to <code>panic</code>
+is discarded, and normal execution resumes.
+Any functions deferred by <code>G</code> before <code>D</code> are then run and <code>G</code>'s
+execution terminates by returning to its caller.
 </p>
+
+<p>
+The return value of <code>recover</code> is <code>nil</code> if any of the following conditions holds:
+</p>
+<ul>
+<li>
+<code>panic</code>'s argument was <code>nil</code>;
+</li>
+<li>
+the goroutine is not panicking;
+</li>
+<li>
+<code>recover</code> was not called directly by a deferred function.
+</li>
+</ul>
 
 <p>
 The <code>protect</code> function in the example below invokes
@@ -5351,7 +5597,8 @@ import . "lib/math"         Sin
 <p>
 An import declaration declares a dependency relation between
 the importing and imported package.
-It is illegal for a package to import itself or to import a package without
+It is illegal for a package to import itself, directly or indirectly,
+or to directly import a package without
 referring to any of its exported identifiers. To import a package solely for
 its side-effects (initialization), use the <a href="#Blank_identifier">blank</a>
 identifier as explicit package name:
@@ -5470,26 +5717,32 @@ func init()
 </pre>
 <p>
 defined in its source.
-A package may contain multiple
-<code>init</code> functions, even
+A package-scope or file-scope identifier
+with name <code>init</code> may only be
+declared to be a function with this signature.
+Multiple such functions may be defined, even
 within a single source file; they execute
 in unspecified order.
 </p>
 <p>
 Within a package, package-level variables are initialized,
-and constant values are determined, in
-data-dependent order: if the initializer of <code>A</code>
-depends on the value of <code>B</code>, <code>A</code>
+and constant values are determined, according to
+order of reference: if the initializer of <code>A</code>
+depends on <code>B</code>, <code>A</code>
 will be set after <code>B</code>.
-It is an error if such dependencies form a cycle.
-Dependency analysis is done lexically: <code>A</code>
+Dependency analysis does not depend on the actual values
+of the items being initialized, only on their appearance
+in the source.
+<code>A</code>
 depends on <code>B</code> if the value of <code>A</code>
 contains a mention of <code>B</code>, contains a value
 whose initializer
 mentions <code>B</code>, or mentions a function that
 mentions <code>B</code>, recursively.
+It is an error if such dependencies form a cycle.
 If two items are not interdependent, they will be initialized
-in the order they appear in the source.
+in the order they appear in the source, possibly in multiple files,
+as presented to the compiler.
 Since the dependency analysis is done per package, it can produce
 unspecified results  if <code>A</code>'s initializer calls a function defined
 in another package that refers to <code>B</code>.
@@ -5608,9 +5861,18 @@ func Sizeof(variable ArbitraryType) uintptr
 </pre>
 
 <p>
-Any pointer or value of <a href="#Types">underlying type</a> <code>uintptr</code> can be converted into
-a <code>Pointer</code> and vice versa.
+Any pointer or value of <a href="#Types">underlying type</a> <code>uintptr</code> can be converted to
+a <code>Pointer</code> type and vice versa.
 </p>
+
+<pre>
+var f float64
+bits = *(*uint64)(unsafe.Pointer(&amp;f))
+
+type ptr unsafe.Pointer
+bits = *(*uint64)(ptr(&amp;f))
+</pre>
+
 <p>
 The functions <code>Alignof</code> and <code>Sizeof</code> take an expression <code>x</code>
 of any type and return the alignment or size, respectively, of a hypothetical variable <code>v</code>
@@ -5618,8 +5880,10 @@ as if <code>v</code> was declared via <code>var v = x</code>.
 </p>
 <p>
 The function <code>Offsetof</code> takes a (possibly parenthesized) <a href="#Selectors">selector</a>
-denoting a struct field of any type and returns the field offset in bytes relative to the
-struct's address.
+<code>s.f</code>, denoting a field <code>f</code> of the struct denoted by <code>s</code>
+or <code>*s</code>, and returns the field offset in bytes relative to the struct's address.
+If <code>f</code> is an <a href="#Struct_types">embedded field</a>, it must be reachable
+without pointer indirections through fields of the struct.
 For a struct <code>s</code> with field <code>f</code>:
 </p>
 
@@ -5648,7 +5912,7 @@ Calls to <code>Alignof</code>, <code>Offsetof</code>, and
 <h3 id="Size_and_alignment_guarantees">Size and alignment guarantees</h3>
 
 <p>
-For the numeric types (§<a href="#Numeric_types">Numeric types</a>), the following sizes are guaranteed:
+For the <a href="#Numeric_types">numeric types</a>, the following sizes are guaranteed:
 </p>
 
 <pre class="grammar">
