@@ -1,3 +1,5 @@
+// +build !plan9
+
 /*
 Plan 9 from User Space src/lib9/getwd.c
 http://code.swtch.com/plan9port/src/tip/src/lib9/getwd.c
@@ -50,5 +52,5 @@ p9getwd(char *s, int ns)
 		return s;
 	}
 
-	return getcwd(s, ns);
+	return getcwd(s, (size_t)ns);
 }

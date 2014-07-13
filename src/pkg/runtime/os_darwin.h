@@ -4,6 +4,8 @@
 
 #define SS_DISABLE 4
 
+typedef byte* kevent_udata;
+
 int32	runtime·bsdthread_create(void*, M*, G*, void(*)(void));
 int32	runtime·bsdthread_register(void);
 int32	runtime·mach_msg_trap(MachHeader*, int32, uint32, uint32, uint32, uint32, uint32);
@@ -21,6 +23,7 @@ int32	runtime·sysctl(uint32*, uint32, byte*, uintptr*, byte*, uintptr);
 
 typedef uint32 Sigset;
 void	runtime·sigprocmask(int32, Sigset*, Sigset*);
+void	runtime·unblocksignals(void);
 
 struct Sigaction;
 void	runtime·sigaction(uintptr, struct Sigaction*, struct Sigaction*);
@@ -37,4 +40,3 @@ void	runtime·setitimer(int32, Itimerval*, Itimerval*);
 #define	SIG_BLOCK 1
 #define	SIG_UNBLOCK 2
 #define	SIG_SETMASK 3
-

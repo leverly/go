@@ -30,6 +30,7 @@
 
 #include <libc.h>
 #include <bio.h>
+#include <link.h>
 
 #ifndef	EXTERN
 #define EXTERN	extern
@@ -48,12 +49,15 @@ typedef	struct	Type	Type;
 typedef	struct	Funct	Funct;
 typedef	struct	Decl	Decl;
 typedef	struct	Io	Io;
-typedef	struct	Hist	Hist;
 typedef	struct	Term	Term;
 typedef	struct	Init	Init;
 typedef	struct	Bits	Bits;
+typedef	struct	Bvec	Bvec;
 typedef	struct	Dynimp	Dynimp;
 typedef	struct	Dynexp	Dynexp;
+typedef	struct	Var	Var;
+
+typedef	Rune	TRune;	/* target system type */
 
 #define	BUFSIZ		8192
 #define	NSYMB		500
@@ -74,6 +78,20 @@ struct	Bits
 	uint32	b[BITS];
 };
 
+struct Bvec
+{
+	int32	n;	// number of bits
+	uint32	b[];
+};
+
+struct	Var
+{
+	vlong	offset;
+	LSym*	sym;
+	char	name;
+	char	etype;
+};
+
 struct	Node
 {
 	Node*	left;
@@ -85,7 +103,7 @@ struct	Node
 	double	fconst;		/* fp constant */
 	vlong	vconst;		/* non fp const */
 	char*	cstring;	/* character string */
-	ushort*	rstring;	/* rune string */
+	TRune*	rstring;	/* rune string */
 
 	Sym*	sym;
 	Type*	type;
@@ -105,6 +123,7 @@ struct	Node
 struct	Sym
 {
 	Sym*	link;
+	LSym*	lsym;
 	Type*	type;
 	Type*	suetag;
 	Type*	tenum;
@@ -190,16 +209,6 @@ struct	Io
 	short	f;
 };
 #define	I	((Io*)0)
-
-struct	Hist
-{
-	Hist*	link;
-	char*	name;
-	int32	line;
-	int32	offset;
-};
-#define	H	((Hist*)0)
-EXTERN Hist*	hist;
 
 struct	Term
 {
@@ -367,6 +376,9 @@ enum
 	TFILE,
 	TOLD,
 	NALLTYPES,
+
+	/* adapt size of Rune to target system's size */
+	TRUNE = sizeof(TRune)==4? TUINT: TUSHORT,
 };
 enum
 {
@@ -457,7 +469,6 @@ EXTERN	int32	autoffset;
 EXTERN	int	blockno;
 EXTERN	Decl*	dclstack;
 EXTERN	int	debug[256];
-EXTERN	Hist*	ehist;
 EXTERN	int32	firstbit;
 EXTERN	Sym*	firstarg;
 EXTERN	Type*	firstargtype;
@@ -486,7 +497,6 @@ EXTERN	int32	nsymb;
 EXTERN	Biobuf	outbuf;
 EXTERN	Biobuf	diagbuf;
 EXTERN	char*	outfile;
-EXTERN	char*	pathname;
 EXTERN	int	peekc;
 EXTERN	int32	stkoff;
 EXTERN	Type*	strf;
@@ -496,8 +506,9 @@ EXTERN	Sym*	symstring;
 EXTERN	int	taggen;
 EXTERN	Type*	tfield;
 EXTERN	Type*	tufield;
-EXTERN	int	thechar;
-EXTERN	char*	thestring;
+extern	int	thechar;
+extern	char*	thestring;
+extern	LinkArch*	thelinkarch;
 EXTERN	Type*	thisfn;
 EXTERN	int32	thunk;
 EXTERN	Type*	types[NALLTYPES];
@@ -513,8 +524,11 @@ EXTERN	int	flag_largemodel;
 EXTERN	int	ncontin;
 EXTERN	int	canreach;
 EXTERN	int	warnreach;
+EXTERN	int	nacl;
 EXTERN	Bits	zbits;
 EXTERN	Fmt	pragcgobuf;
+EXTERN	Biobuf	bstdout;
+EXTERN	Var	var[NVAR];
 
 extern	char	*onames[], *tnames[], *gnames[];
 extern	char	*cnames[], *qnames[], *bnames[];
@@ -544,6 +558,7 @@ extern	uchar	typechlpfd[];
 
 EXTERN	uchar*	typeword;
 EXTERN	uchar*	typecmplx;
+EXTERN	Link*	ctxt;
 
 extern	uint32	thash1;
 extern	uint32	thash2;
@@ -591,6 +606,7 @@ int	FNconv(Fmt*);
 int	Oconv(Fmt*);
 int	Qconv(Fmt*);
 int	VBconv(Fmt*);
+int	Bconv(Fmt*);
 void	setinclude(char*);
 
 /*
@@ -600,7 +616,6 @@ void	dodefine(char*);
 void	domacro(void);
 Sym*	getsym(void);
 int32	getnsn(void);
-void	linehist(char*, int);
 void	macdef(void);
 void	macprag(void);
 void	macend(void);
@@ -719,6 +734,7 @@ void	diag(Node*, char*, ...);
 void	warn(Node*, char*, ...);
 void	yyerror(char*, ...);
 void	fatal(Node*, char*, ...);
+LSym*	linksym(Sym*);
 
 /*
  * acid.c
@@ -746,6 +762,12 @@ int	beq(Bits, Bits);
 int	bset(Bits, uint);
 
 /*
+ *	bv.c
+ */
+Bvec*	bvalloc(int32 n);
+void	bvset(Bvec *bv, int32 i);
+
+/*
  * dpchk.c
  */
 void	dpcheck(Node*);
@@ -766,12 +788,14 @@ void	gclean(void);
 void	gextern(Sym*, Node*, int32, int32);
 void	ginit(void);
 int32	outstring(char*, int32);
-int32	outlstring(ushort*, int32);
+int32	outlstring(TRune*, int32);
 void	sextern(Sym*, Node*, int32, int32);
 void	xcom(Node*);
 int32	exreg(Type*);
 int32	align(int32, Type*, int, int32*);
 int32	maxround(int32, int32);
+int	hasdotdotdot(void);
+void    linkarchinit(void);
 
 extern	schar	ewidth[];
 
@@ -795,12 +819,12 @@ int	machcap(Node*);
 #pragma	varargck	argpos	diag	2
 #pragma	varargck	argpos	yyerror	1
 
+#pragma	varargck	type	"B"	Bits
 #pragma	varargck	type	"F"	Node*
 #pragma	varargck	type	"L"	int32
 #pragma	varargck	type	"Q"	int32
 #pragma	varargck	type	"O"	int
 #pragma	varargck	type	"O"	uint
-#pragma	varargck	type	"S"	ushort*
 #pragma	varargck	type	"T"	Type*
 #pragma	varargck	type	"U"	char*
 #pragma	varargck	type	"|"	int

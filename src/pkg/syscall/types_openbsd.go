@@ -18,6 +18,7 @@ package syscall
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <termios.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/param.h>
@@ -40,6 +41,7 @@ package syscall
 #include <net/if_dl.h>
 #include <net/route.h>
 #include <netinet/in.h>
+#include <netinet/icmp6.h>
 #include <netinet/tcp.h>
 
 enum {
@@ -154,6 +156,10 @@ type Cmsghdr C.struct_cmsghdr
 
 type Inet6Pktinfo C.struct_in6_pktinfo
 
+type IPv6MTUInfo C.struct_ip6_mtuinfo
+
+type ICMPv6Filter C.struct_icmp6_filter
+
 const (
 	SizeofSockaddrInet4    = C.sizeof_struct_sockaddr_in
 	SizeofSockaddrInet6    = C.sizeof_struct_sockaddr_in6
@@ -166,6 +172,8 @@ const (
 	SizeofMsghdr           = C.sizeof_struct_msghdr
 	SizeofCmsghdr          = C.sizeof_struct_cmsghdr
 	SizeofInet6Pktinfo     = C.sizeof_struct_in6_pktinfo
+	SizeofIPv6MTUInfo      = C.sizeof_struct_ip6_mtuinfo
+	SizeofICMPv6Filter     = C.sizeof_struct_icmp6_filter
 )
 
 // Ptrace requests
@@ -230,3 +238,7 @@ type BpfInsn C.struct_bpf_insn
 type BpfHdr C.struct_bpf_hdr
 
 type BpfTimeval C.struct_bpf_timeval
+
+// Terminal handling
+
+type Termios C.struct_termios

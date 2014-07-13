@@ -5,6 +5,7 @@
 #include "runtime.h"
 #include "defs_GOOS_GOARCH.h"
 #include "os_GOOS.h"
+#include "../../cmd/ld/textflag.h"
 
 #define AT_NULL		0
 #define AT_PLATFORM	15 // introduced in at least 2.6.11
@@ -15,7 +16,7 @@
 static uint32 runtime·randomNumber;
 uint8  runtime·armArch = 6;	// we default to ARMv6
 uint32 runtime·hwcap;	// set by setup_auxv
-uint8  runtime·goarm;	// set by 5l
+extern uint8  runtime·goarm;	// set by 5l
 
 void
 runtime·checkgoarm(void)
@@ -32,17 +33,14 @@ runtime·checkgoarm(void)
 	}
 }
 
-#pragma textflag 7
+#pragma textflag NOSPLIT
 void
-runtime·setup_auxv(int32 argc, void *argv_list)
+runtime·setup_auxv(int32 argc, byte **argv)
 {
-	byte **argv;
 	byte **envp;
 	byte *rnd;
 	uint32 *auxv;
 	uint32 t;
-
-	argv = &argv_list;
 
 	// skip envp to get to ELF auxiliary vector.
 	for(envp = &argv[argc+1]; *envp != nil; envp++)
@@ -71,7 +69,7 @@ runtime·setup_auxv(int32 argc, void *argv_list)
 	}
 }
 
-#pragma textflag 7
+#pragma textflag NOSPLIT
 int64
 runtime·cputicks(void)
 {

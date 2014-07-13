@@ -44,7 +44,7 @@ initname(char *s)
 	return strcmp(s, "init") == 0;
 }
 
-// exportedsym returns whether a symbol will be visible
+// exportedsym reports whether a symbol will be visible
 // to files that import our package.
 static int
 exportedsym(Sym *sym)
@@ -161,16 +161,25 @@ reexportdep(Node *n)
 	case OCONV:
 	case OCONVIFACE:
 	case OCONVNOP:
+	case ORUNESTR:
+	case OARRAYBYTESTR:
+	case OARRAYRUNESTR:
+	case OSTRARRAYBYTE:
+	case OSTRARRAYRUNE:
 	case ODOTTYPE:
 	case ODOTTYPE2:
 	case OSTRUCTLIT:
+	case OARRAYLIT:
 	case OPTRLIT:
+	case OMAKEMAP:
+	case OMAKESLICE:
+	case OMAKECHAN:
 		t = n->type;
 		if(!t->sym && t->type)
 			t = t->type;
 		if(t && t->sym && t->sym->def && !exportedsym(t->sym)) {
 			if(debug['E'])
-				print("reexport type for convnop %S\n", t->sym);
+				print("reexport type for expression %S\n", t->sym);
 			exportlist = list(exportlist, t->sym->def);
 		}
 		break;
@@ -345,7 +354,7 @@ dumpexport(void)
 
 	lno = lineno;
 
-	Bprint(bout, "\n$$  // exports\n    package %s", localpkg->name);
+	Bprint(bout, "\n$$\npackage %s", localpkg->name);
 	if(safemode)
 		Bprint(bout, " safe");
 	Bprint(bout, "\n");
@@ -360,8 +369,7 @@ dumpexport(void)
 		dumpsym(l->n->sym);
 	}
 
-	Bprint(bout, "\n$$  // local types\n\n$$\n");   // 6l expects this. (see ld/go.c)
-
+	Bprint(bout, "\n$$\n");
 	lineno = lno;
 }
 
@@ -472,9 +480,10 @@ importvar(Sym *s, Type *t)
 	if(s->def != N && s->def->op == ONAME) {
 		if(eqtype(t, s->def->type))
 			return;
-		yyerror("inconsistent definition for var %S during import\n\t%T\n\t%T", s, s->def->type, t);
+		yyerror("inconsistent definition for var %S during import\n\t%T (in \"%Z\")\n\t%T (in \"%Z\")", s, s->def->type, s->importdef->path, t, importpkg->path);
 	}
 	n = newname(s);
+	s->importdef = importpkg;
 	n->type = t;
 	declare(n, PEXTERN);
 
@@ -500,11 +509,12 @@ importtype(Type *pt, Type *t)
 		n = pt->nod;
 		copytype(pt->nod, t);
 		pt->nod = n;		// unzero nod
+		pt->sym->importdef = importpkg;
 		pt->sym->lastlineno = parserline();
 		declare(n, PEXTERN);
 		checkwidth(pt);
 	} else if(!eqtype(pt->orig, t))
-		yyerror("inconsistent definition for type %S during import\n\t%lT\n\t%lT", pt->sym, pt, t);
+		yyerror("inconsistent definition for type %S during import\n\t%lT (in \"%Z\")\n\t%lT (in \"%Z\")", pt->sym, pt, pt->sym->importdef->path, t, importpkg->path);
 
 	if(debug['E'])
 		print("import type %T %lT\n", pt, t);

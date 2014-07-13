@@ -36,29 +36,10 @@
 
 #define	NREGVAR	32
 #define	REGBITS	((uint32)0xffffffff)
-#define	P2R(p)	(Reg*)(p->reg)
 
 	void	addsplits(void);
-	int	noreturn(Prog *p);
-static	int	first	= 0;
-
-static	void	fixjmp(Prog*);
-
-
-Reg*
-rega(void)
-{
-	Reg *r;
-
-	r = freer;
-	if(r == R) {
-		r = mal(sizeof(*r));
-	} else
-		freer = r->link;
-
-	*r = zreg;
-	return r;
-}
+static	Reg*	firstr;
+static	int	first	= 1;
 
 int
 rcmp(const void *a1, const void *a2)
@@ -75,32 +56,8 @@ rcmp(const void *a1, const void *a2)
 	return p2->varno - p1->varno;
 }
 
-static void
-setoutvar(void)
-{
-	Type *t;
-	Node *n;
-	Addr a;
-	Iter save;
-	Bits bit;
-	int z;
-
-	t = structfirst(&save, getoutarg(curfn->type));
-	while(t != T) {
-		n = nodarg(t, 1);
-		a = zprog.from;
-		naddr(n, &a, 0);
-		bit = mkvar(R, &a);
-		for(z=0; z<BITS; z++)
-			ovar.b[z] |= bit.b[z];
-		t = structnext(&save);
-	}
-//if(bany(&ovar))
-//print("ovar = %Q\n", ovar);
-}
-
 void
-excise(Reg *r)
+excise(Flow *r)
 {
 	Prog *p;
 
@@ -172,43 +129,25 @@ static char* regname[] = {
 
 static Node* regnodes[NREGVAR];
 
+static void walkvardef(Node *n, Reg *r, int active);
+
 void
 regopt(Prog *firstp)
 {
 	Reg *r, *r1;
 	Prog *p;
-	int i, z, nr;
+	Graph *g;
+	int i, z, active;
 	uint32 vreg;
 	Bits bit;
-	
-	if(first == 0) {
+	ProgInfo info;
+
+	if(first) {
 		fmtinstall('Q', Qconv);
-	}
-	
-	fixjmp(firstp);
-
-	first++;
-	if(debug['K']) {
-		if(first != 13)
-			return;
-//		debug['R'] = 2;
-//		debug['P'] = 2;
-		print("optimizing %S\n", curfn->nname->sym);
+		first = 0;
 	}
 
-	// count instructions
-	nr = 0;
-	for(p=firstp; p!=P; p=p->link)
-		nr++;
-
-	// if too big dont bother
-	if(nr >= 10000) {
-//		print("********** %S is too big (%d)\n", curfn->nname->sym, nr);
-		return;
-	}
-
-	firstr = R;
-	lastr = R;
+	mergetemp(firstp);
 
 	/*
 	 * control flow is more complicated in generated go code
@@ -229,11 +168,9 @@ regopt(Prog *firstp)
 		params.b[z] = 0;
 		consts.b[z] = 0;
 		addrs.b[z] = 0;
+		ivar.b[z] = 0;
 		ovar.b[z] = 0;
 	}
-
-	// build list of return variables
-	setoutvar();
 
 	/*
 	 * pass 1
@@ -241,178 +178,49 @@ regopt(Prog *firstp)
 	 * allocate pcs
 	 * find use and set of variables
 	 */
-	nr = 0;
-	for(p=firstp; p != P; p = p->link) {
-		switch(p->as) {
-		case ADATA:
-		case AGLOBL:
-		case ANAME:
-		case ASIGNAME:
-		case ALOCALS:
-		case ATYPE:
-			continue;
-		}
-		r = rega();
-		nr++;
-		if(firstr == R) {
-			firstr = r;
-			lastr = r;
-		} else {
-			lastr->link = r;
-			r->p1 = lastr;
-			lastr->s1 = r;
-			lastr = r;
-		}
-		r->prog = p;
-		p->regp = r;
+	g = flowstart(firstp, sizeof(Reg));
+	if(g == nil) {
+		for(i=0; i<nvar; i++)
+			var[i].node->opt = nil;
+		return;
+	}
 
-		r1 = r->p1;
-		if(r1 != R) {
-			switch(r1->prog->as) {
-			case ARET:
-			case AB:
-			case ARFE:
-				r->p1 = R;
-				r1->s1 = R;
-			}
-		}
+	firstr = (Reg*)g->start;
+
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
+		p = r->f.prog;
+		if(p->as == AVARDEF || p->as == AVARKILL)
+			continue;
+		proginfo(&info, p);
 
 		// Avoid making variables for direct-called functions.
 		if(p->as == ABL && p->to.type == D_EXTERN)
 			continue;
 
-		/*
-		 * left side always read
-		 */
 		bit = mkvar(r, &p->from);
-		for(z=0; z<BITS; z++)
-			r->use1.b[z] |= bit.b[z];
-		
-		/*
-		 * middle always read when present
-		 */
-		if(p->reg != NREG) {
+		if(info.flags & LeftRead)
+			for(z=0; z<BITS; z++)
+				r->use1.b[z] |= bit.b[z];
+		if(info.flags & LeftAddr)
+			setaddrs(bit);
+
+		if(info.flags & RegRead) {	
 			if(p->from.type != D_FREG)
 				r->use1.b[0] |= RtoB(p->reg);
 			else
 				r->use1.b[0] |= FtoB(p->reg);
 		}
 
-		/*
-		 * right side depends on opcode
-		 */
-		bit = mkvar(r, &p->to);
-		if(bany(&bit))
-		switch(p->as) {
-		default:
-			yyerror("reg: unknown op: %A", p->as);
-			break;
-		
-		/*
-		 * right side read
-		 */
-		case ATST:
-		case ATEQ:
-		case ACMP:
-		case ACMN:
-		case ACMPD:
-		case ACMPF:
-		rightread:
-			for(z=0; z<BITS; z++)
-				r->use2.b[z] |= bit.b[z];
-			break;
-			
-		/*
-		 * right side read or read+write, depending on middle
-		 *	ADD x, z => z += x
-		 *	ADD x, y, z  => z = x + y
-		 */
-		case AADD:
-		case AAND:
-		case AEOR:
-		case ASUB:
-		case ARSB:
-		case AADC:
-		case ASBC:
-		case ARSC:
-		case AORR:
-		case ABIC:
-		case ASLL:
-		case ASRL:
-		case ASRA:
-		case AMUL:
-		case AMULU:
-		case ADIV:
-		case AMOD:
-		case AMODU:
-		case ADIVU:
-			if(p->reg != NREG)
-				goto rightread;
-			// fall through
-
-		/*
-		 * right side read+write
-		 */
-		case AADDF:
-		case AADDD:
-		case ASUBF:
-		case ASUBD:
-		case AMULF:
-		case AMULD:
-		case ADIVF:
-		case ADIVD:
-		case AMULA:
-		case AMULAL:
-		case AMULALU:
-			for(z=0; z<BITS; z++) {
-				r->use2.b[z] |= bit.b[z];
-				r->set.b[z] |= bit.b[z];
-			}
-			break;
-
-		/*
-		 * right side write
-		 */
-		case ANOP:
-		case AMOVB:
-		case AMOVBU:
-		case AMOVD:
-		case AMOVDF:
-		case AMOVDW:
-		case AMOVF:
-		case AMOVFW:
-		case AMOVH:
-		case AMOVHU:
-		case AMOVW:
-		case AMOVWD:
-		case AMOVWF:
-		case AMVN:
-		case AMULL:
-		case AMULLU:
-			if((p->scond & C_SCOND) != C_SCOND_NONE)
+		if(info.flags & (RightAddr | RightRead | RightWrite)) {
+			bit = mkvar(r, &p->to);
+			if(info.flags & RightAddr)
+				setaddrs(bit);
+			if(info.flags & RightRead)
 				for(z=0; z<BITS; z++)
 					r->use2.b[z] |= bit.b[z];
-			for(z=0; z<BITS; z++)
-				r->set.b[z] |= bit.b[z];
-			break;
-
-		/*
-		 * funny
-		 */
-		case ABL:
-			setaddrs(bit);
-			break;
-		}
-
-		if(p->as == AMOVM) {
-			z = p->to.offset;
-			if(p->from.type == D_CONST)
-				z = p->from.offset;
-			for(i=0; z; i++) {
-				if(z&1)
-					regbits |= RtoB(i);
-				z >>= 1;
-			}
+			if(info.flags & RightWrite)
+				for(z=0; z<BITS; z++)
+					r->set.b[z] |= bit.b[z];
 		}
 	}
 	if(firstr == R)
@@ -432,50 +240,36 @@ regopt(Prog *firstp)
 	}
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass1", firstr);
+		dumpit("pass1", &firstr->f, 1);
 
 	/*
 	 * pass 2
-	 * turn branch references to pointers
-	 * build back pointers
+	 * find looping structure
 	 */
-	for(r=firstr; r!=R; r=r->link) {
-		p = r->prog;
-		if(p->to.type == D_BRANCH) {
-			if(p->to.u.branch == P)
-				fatal("pnil %P", p);
-			r1 = p->to.u.branch->regp;
-			if(r1 == R)
-				fatal("rnil %P", p);
-			if(r1 == r) {
-				//fatal("ref to self %P", p);
-				continue;
-			}
-			r->s2 = r1;
-			r->p2link = r1->p2;
-			r1->p2 = r;
-		}
-	}
-	if(debug['R']) {
-		p = firstr->prog;
-		print("\n%L %D\n", p->lineno, &p->from);
-		print("	addr = %Q\n", addrs);
-	}
+	flowrpo(g);
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass2", firstr);
+		dumpit("pass2", &firstr->f, 1);
 
 	/*
 	 * pass 2.5
-	 * find looping structure
+	 * iterate propagating fat vardef covering forward
+	 * r->act records vars with a VARDEF since the last CALL.
+	 * (r->act will be reused in pass 5 for something else,
+	 * but we'll be done with it by then.)
 	 */
-	for(r = firstr; r != R; r = r->link)
-		r->active = 0;
-	change = 0;
-	loopit(firstr, nr);
-
-	if(debug['R'] && debug['v'])
-		dumpit("pass2.5", firstr);
+	active = 0;
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
+		r->f.active = 0;
+		r->act = zbits;
+	}
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
+		p = r->f.prog;
+		if(p->as == AVARDEF && isfat(p->to.node->type) && p->to.node->opt != nil) {
+			active++;
+			walkvardef(p->to.node, r, active);
+		}
+	}
 
 	/*
 	 * pass 3
@@ -484,17 +278,17 @@ regopt(Prog *firstp)
 	 */
 loop1:
 	change = 0;
-	for(r = firstr; r != R; r = r->link)
-		r->active = 0;
-	for(r = firstr; r != R; r = r->link)
-		if(r->prog->as == ARET)
+	for(r = firstr; r != R; r = (Reg*)r->f.link)
+		r->f.active = 0;
+	for(r = firstr; r != R; r = (Reg*)r->f.link)
+		if(r->f.prog->as == ARET)
 			prop(r, zbits, zbits);
 loop11:
 	/* pick up unreachable code */
 	i = 0;
 	for(r = firstr; r != R; r = r1) {
-		r1 = r->link;
-		if(r1 && r1->active && !r->active) {
+		r1 = (Reg*)r->f.link;
+		if(r1 && r1->f.active && !r->f.active) {
 			prop(r, zbits, zbits);
 			i = 1;
 		}
@@ -505,7 +299,7 @@ loop11:
 		goto loop1;
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass3", firstr);
+		dumpit("pass3", &firstr->f, 1);
 
 
 	/*
@@ -515,8 +309,8 @@ loop11:
 	 */
 loop2:
 	change = 0;
-	for(r = firstr; r != R; r = r->link)
-		r->active = 0;
+	for(r = firstr; r != R; r = (Reg*)r->f.link)
+		r->f.active = 0;
 	synch(firstr, zbits);
 	if(change)
 		goto loop2;
@@ -524,12 +318,12 @@ loop2:
 	addsplits();
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass4", firstr);
+		dumpit("pass4", &firstr->f, 1);
 
 	if(debug['R'] > 1) {
 		print("\nprop structure:\n");
-		for(r = firstr; r != R; r = r->link) {
-			print("%d:%P", r->loop, r->prog);
+		for(r = firstr; r != R; r = (Reg*)r->f.link) {
+			print("%d:%P", r->f.loop, r->f.prog);
 			for(z=0; z<BITS; z++) {
 				bit.b[z] = r->set.b[z] |
 					r->refahead.b[z] | r->calahead.b[z] |
@@ -563,7 +357,7 @@ loop2:
 	 * pass 4.5
 	 * move register pseudo-variables into regu.
 	 */
-	for(r = firstr; r != R; r = r->link) {
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
 		r->regu = (r->refbehind.b[0] | r->set.b[0]) & REGBITS;
 
 		r->set.b[0] &= ~REGBITS;
@@ -578,7 +372,7 @@ loop2:
 	}
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass4.5", firstr);
+		dumpit("pass4.5", &firstr->f, 1);
 
 	/*
 	 * pass 5
@@ -590,27 +384,27 @@ loop2:
 		for(z=0; z<BITS; z++)
 			bit.b[z] = (r->refahead.b[z] | r->calahead.b[z]) &
 			  ~(externs.b[z] | params.b[z] | addrs.b[z] | consts.b[z]);
-		if(bany(&bit) & !r->refset) {
+		if(bany(&bit) & !r->f.refset) {
 			// should never happen - all variables are preset
 			if(debug['w'])
-				print("%L: used and not set: %Q\n", r->prog->lineno, bit);
-			r->refset = 1;
+				print("%L: used and not set: %Q\n", r->f.prog->lineno, bit);
+			r->f.refset = 1;
 		}
 	}
 
-	for(r = firstr; r != R; r = r->link)
+	for(r = firstr; r != R; r = (Reg*)r->f.link)
 		r->act = zbits;
 	rgp = region;
 	nregion = 0;
-	for(r = firstr; r != R; r = r->link) {
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
 		for(z=0; z<BITS; z++)
 			bit.b[z] = r->set.b[z] &
 			  ~(r->refahead.b[z] | r->calahead.b[z] | addrs.b[z]);
-		if(bany(&bit) && !r->refset) {
+		if(bany(&bit) && !r->f.refset) {
 			if(debug['w'])
-				print("%L: set and not used: %Q\n", r->prog->lineno, bit);
-			r->refset = 1;
-			excise(r);
+				print("%L: set and not used: %Q\n", r->f.prog->lineno, bit);
+			r->f.refset = 1;
+			excise(&r->f);
 		}
 		for(z=0; z<BITS; z++)
 			bit.b[z] = LOAD(r) & ~(r->act.b[z] | addrs.b[z]);
@@ -626,7 +420,7 @@ loop2:
 			if(change <= 0) {
 				if(debug['R'])
 					print("%L $%d: %Q\n",
-						r->prog->lineno, change, blsh(i));
+						r->f.prog->lineno, change, blsh(i));
 				continue;
 			}
 			rgp->cost = change;
@@ -643,7 +437,7 @@ brk:
 	qsort(region, nregion, sizeof(region[0]), rcmp);
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass5", firstr);
+		dumpit("pass5", &firstr->f, 1);
 
 	/*
 	 * pass 6
@@ -658,13 +452,13 @@ brk:
 		if(debug['R']) {
 			if(rgp->regno >= NREG)
 				print("%L $%d F%d: %Q\n",
-					rgp->enter->prog->lineno,
+					rgp->enter->f.prog->lineno,
 					rgp->cost,
 					rgp->regno-NREG,
 					bit);
 			else
 				print("%L $%d R%d: %Q\n",
-					rgp->enter->prog->lineno,
+					rgp->enter->f.prog->lineno,
 					rgp->cost,
 					rgp->regno,
 					bit);
@@ -675,18 +469,26 @@ brk:
 	}
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass6", firstr);
+		dumpit("pass6", &firstr->f, 1);
+
+	/*
+	 * free aux structures. peep allocates new ones.
+	 */
+	for(i=0; i<nvar; i++)
+		var[i].node->opt = nil;
+	flowend(g);
+	firstr = R;
 
 	/*
 	 * pass 7
 	 * peep-hole on basic block
 	 */
 	if(!debug['R'] || debug['P']) {
-		peep();
+		peep(firstp);
 	}
 
 	if(debug['R'] && debug['v'])
-		dumpit("pass7", firstr);
+		dumpit("pass7", &firstr->f, 1);
 
 	/*
 	 * last pass
@@ -730,23 +532,44 @@ brk:
 		}
 
 		if(p->as == AMOVW && vreg != 0) {
-			if(p->from.sym != S)
+			if(p->from.sym != nil)
 			if(p->from.name == D_AUTO || p->from.name == D_PARAM) {
 				p->from.offset += vreg;
 //				print("%P adjusting from %d %d\n", p, vreg, p->from.type);
 			}
-			if(p->to.sym != S)
+			if(p->to.sym != nil)
 			if(p->to.name == D_AUTO || p->to.name == D_PARAM) {
 				p->to.offset += vreg;
 //				print("%P adjusting to %d %d\n", p, vreg, p->from.type);
 			}
 		}
 	}
-	if(lastr != R) {
-		lastr->link = freer;
-		freer = firstr;
+}
+
+static void
+walkvardef(Node *n, Reg *r, int active)
+{
+	Reg *r1, *r2;
+	int bn;
+	Var *v;
+	
+	for(r1=r; r1!=R; r1=(Reg*)r1->f.s1) {
+		if(r1->f.active == active)
+			break;
+		r1->f.active = active;
+		if(r1->f.prog->as == AVARKILL && r1->f.prog->to.node == n)
+			break;
+		for(v=n->opt; v!=nil; v=v->nextinnode) {
+			bn = v - var;
+			r1->act.b[bn/32] |= 1L << (bn%32);
+		}
+		if(r1->f.prog->as == ABL)
+			break;
 	}
 
+	for(r2=r; r2!=r1; r2=(Reg*)r2->f.s1)
+		if(r2->f.s2 != nil)
+			walkvardef(n, (Reg*)r2->f.s2, active);
 }
 
 void
@@ -756,13 +579,17 @@ addsplits(void)
 	int z, i;
 	Bits bit;
 
-	for(r = firstr; r != R; r = r->link) {
-		if(r->loop > 1)
+	for(r = firstr; r != R; r = (Reg*)r->f.link) {
+		if(r->f.loop > 1)
 			continue;
-		if(r->prog->as == ABL)
+		if(r->f.prog->as == ABL)
 			continue;
-		for(r1 = r->p2; r1 != R; r1 = r1->p2link) {
-			if(r1->loop <= 1)
+		if(r->f.prog->as == ADUFFZERO)
+			continue;
+		if(r->f.prog->as == ADUFFCOPY)
+			continue;
+		for(r1 = (Reg*)r->f.p2; r1 != R; r1 = (Reg*)r1->f.p2link) {
+			if(r1->f.loop <= 1)
 				continue;
 			for(z=0; z<BITS; z++)
 				bit.b[z] = r1->calbehind.b[z] &
@@ -789,7 +616,7 @@ addmove(Reg *r, int bn, int rn, int f)
 
 	p1 = mal(sizeof(*p1));
 	*p1 = zprog;
-	p = r->prog;
+	p = r->f.prog;
 	
 	// If there's a stack fixup coming (after BL newproc or BL deferproc),
 	// delay the load until after the fixup.
@@ -806,22 +633,22 @@ addmove(Reg *r, int bn, int rn, int f)
 	a = &p1->to;
 	a->name = v->name;
 	a->node = v->node;
-	a->sym = v->node->sym;
+	a->sym = linksym(v->node->sym);
 	a->offset = v->offset;
 	a->etype = v->etype;
 	a->type = D_OREG;
-	if(a->etype == TARRAY || a->sym == S)
+	if(a->etype == TARRAY || a->sym == nil)
 		a->type = D_CONST;
 
 	if(v->addr)
-		fatal("addmove: shouldnt be doing this %A\n", a);
+		fatal("addmove: shouldn't be doing this %A\n", a);
 
 	switch(v->etype) {
 	default:
 		print("What is this %E\n", v->etype);
 
 	case TINT8:
-		p1->as = AMOVB;
+		p1->as = AMOVBS;
 		break;
 	case TBOOL:
 	case TUINT8:
@@ -829,7 +656,7 @@ addmove(Reg *r, int bn, int rn, int f)
 		p1->as = AMOVBU;
 		break;
 	case TINT16:
-		p1->as = AMOVH;
+		p1->as = AMOVHS;
 		break;
 	case TUINT16:
 		p1->as = AMOVHU;
@@ -908,9 +735,6 @@ mkvar(Reg *r, Adr *a)
 	case D_BRANCH:
 		break;
 
-	case D_CONST:
-		flag = 1;
-		goto onereg;
 
 	case D_REGREG:
 	case D_REGREG2:
@@ -921,9 +745,9 @@ mkvar(Reg *r, Adr *a)
 			bit.b[0] |= RtoB(a->reg);
 		return bit;
 
+	case D_CONST:
 	case D_REG:
 	case D_SHIFT:
-	onereg:
 		if(a->reg != NREG) {
 			bit = zbits;
 			bit.b[0] = RtoB(a->reg);
@@ -933,11 +757,11 @@ mkvar(Reg *r, Adr *a)
 
 	case D_OREG:
 		if(a->reg != NREG) {
-			if(a == &r->prog->from)
+			if(a == &r->f.prog->from)
 				r->use1.b[0] |= RtoB(a->reg);
 			else
 				r->use2.b[0] |= RtoB(a->reg);
-			if(r->prog->scond & (C_PBIT|C_WBIT))
+			if(r->f.prog->scond & (C_PBIT|C_WBIT))
 				r->set.b[0] |= RtoB(a->reg);
 		}
 		break;
@@ -1003,6 +827,16 @@ mkvar(Reg *r, Adr *a)
 	if(nvar >= NVAR) {
 		if(debug['w'] > 1 && node)
 			fatal("variable not optimized: %D", a);
+		
+		// If we're not tracking a word in a variable, mark the rest as
+		// having its address taken, so that we keep the whole thing
+		// live at all calls. otherwise we might optimize away part of
+		// a variable but not all of it.
+		for(i=0; i<nvar; i++) {
+			v = var+i;
+			if(v->node == node)
+				v->addr = 1;
+		}
 		goto none;
 	}
 
@@ -1017,9 +851,13 @@ mkvar(Reg *r, Adr *a)
 	v->addr = flag;		// funny punning
 	v->node = node;
 	
-	if(debug['R'])
-		print("bit=%2d et=%2E w=%d+%d %#N %D flag=%d\n", i, et, o, w, node, a, v->addr);
-
+	// node->opt is the head of a linked list
+	// of Vars within the given Node, so that
+	// we can start at a Var and find all the other
+	// Vars in the same Go variable.
+	v->nextinnode = node->opt;
+	node->opt = v;
+	
 	bit = blsh(i);
 	if(n == D_EXTERN || n == D_STATIC)
 		for(z=0; z<BITS; z++)
@@ -1027,6 +865,45 @@ mkvar(Reg *r, Adr *a)
 	if(n == D_PARAM)
 		for(z=0; z<BITS; z++)
 			params.b[z] |= bit.b[z];
+
+	if(node->class == PPARAM)
+		for(z=0; z<BITS; z++)
+			ivar.b[z] |= bit.b[z];
+	if(node->class == PPARAMOUT)
+		for(z=0; z<BITS; z++)
+			ovar.b[z] |= bit.b[z];
+
+	// Treat values with their address taken as live at calls,
+	// because the garbage collector's liveness analysis in ../gc/plive.c does.
+	// These must be consistent or else we will elide stores and the garbage
+	// collector will see uninitialized data.
+	// The typical case where our own analysis is out of sync is when the
+	// node appears to have its address taken but that code doesn't actually
+	// get generated and therefore doesn't show up as an address being
+	// taken when we analyze the instruction stream.
+	// One instance of this case is when a closure uses the same name as
+	// an outer variable for one of its own variables declared with :=.
+	// The parser flags the outer variable as possibly shared, and therefore
+	// sets addrtaken, even though it ends up not being actually shared.
+	// If we were better about _ elision, _ = &x would suffice too.
+	// The broader := in a closure problem is mentioned in a comment in
+	// closure.c:/^typecheckclosure and dcl.c:/^oldname.
+	if(node->addrtaken)
+		v->addr = 1;
+
+	// Disable registerization for globals, because:
+	// (1) we might panic at any time and we want the recovery code
+	// to see the latest values (issue 1304).
+	// (2) we don't know what pointers might point at them and we want
+	// loads via those pointers to see updated values and vice versa (issue 7995).
+	//
+	// Disable registerization for results if using defer, because the deferred func
+	// might recover and return, causing the current values to be used.
+	if(node->class == PEXTERN || (hasdefer && node->class == PPARAMOUT))
+		v->addr = 1;
+
+	if(debug['R'])
+		print("bit=%2d et=%2E w=%d+%d %#N %D flag=%d\n", i, et, o, w, node, a, v->addr);
 
 	return bit;
 
@@ -1038,9 +915,10 @@ void
 prop(Reg *r, Bits ref, Bits cal)
 {
 	Reg *r1, *r2;
-	int z;
+	int z, i, j;
+	Var *v, *v1;
 
-	for(r1 = r; r1 != R; r1 = r1->p1) {
+	for(r1 = r; r1 != R; r1 = (Reg*)r1->f.p1) {
 		for(z=0; z<BITS; z++) {
 			ref.b[z] |= r1->refahead.b[z];
 			if(ref.b[z] != r1->refahead.b[z]) {
@@ -1053,13 +931,64 @@ prop(Reg *r, Bits ref, Bits cal)
 				change++;
 			}
 		}
-		switch(r1->prog->as) {
+		switch(r1->f.prog->as) {
 		case ABL:
-			if(noreturn(r1->prog))
+			if(noreturn(r1->f.prog))
 				break;
+
+			// Mark all input variables (ivar) as used, because that's what the
+			// liveness bitmaps say. The liveness bitmaps say that so that a
+			// panic will not show stale values in the parameter dump.
+			// Mark variables with a recent VARDEF (r1->act) as used,
+			// so that the optimizer flushes initializations to memory,
+			// so that if a garbage collection happens during this CALL,
+			// the collector will see initialized memory. Again this is to
+			// match what the liveness bitmaps say.
 			for(z=0; z<BITS; z++) {
-				cal.b[z] |= ref.b[z] | externs.b[z];
+				cal.b[z] |= ref.b[z] | externs.b[z] | ivar.b[z] | r1->act.b[z];
 				ref.b[z] = 0;
+			}
+			
+			// cal.b is the current approximation of what's live across the call.
+			// Every bit in cal.b is a single stack word. For each such word,
+			// find all the other tracked stack words in the same Go variable
+			// (struct/slice/string/interface) and mark them live too.
+			// This is necessary because the liveness analysis for the garbage
+			// collector works at variable granularity, not at word granularity.
+			// It is fundamental for slice/string/interface: the garbage collector
+			// needs the whole value, not just some of the words, in order to
+			// interpret the other bits correctly. Specifically, slice needs a consistent
+			// ptr and cap, string needs a consistent ptr and len, and interface
+			// needs a consistent type word and data word.
+			for(z=0; z<BITS; z++) {
+				if(cal.b[z] == 0)
+					continue;
+				for(i=0; i<32; i++) {
+					if(z*32+i >= nvar || ((cal.b[z]>>i)&1) == 0)
+						continue;
+					v = var+z*32+i;
+					if(v->node->opt == nil) // v represents fixed register, not Go variable
+						continue;
+
+					// v->node->opt is the head of a linked list of Vars
+					// corresponding to tracked words from the Go variable v->node.
+					// Walk the list and set all the bits.
+					// For a large struct this could end up being quadratic:
+					// after the first setting, the outer loop (for z, i) would see a 1 bit
+					// for all of the remaining words in the struct, and for each such
+					// word would go through and turn on all the bits again.
+					// To avoid the quadratic behavior, we only turn on the bits if
+					// v is the head of the list or if the head's bit is not yet turned on.
+					// This will set the bits at most twice, keeping the overall loop linear.
+					v1 = v->node->opt;
+					j = v1 - var;
+					if(v == v1 || ((cal.b[j/32]>>(j&31))&1) == 0) {
+						for(; v1 != nil; v1 = v1->nextinnode) {
+							j = v1 - var;
+							cal.b[j/32] |= 1<<(j&31);
+						}
+					}
+				}
 			}
 			break;
 
@@ -1076,17 +1005,6 @@ prop(Reg *r, Bits ref, Bits cal)
 				ref.b[z] = 0;
 			}
 			break;
-
-		default:
-			// Work around for issue 1304:
-			// flush modified globals before each instruction.
-			for(z=0; z<BITS; z++) {
-				cal.b[z] |= externs.b[z];
-				// issue 4066: flush modified return variables in case of panic
-				if(hasdefer)
-					cal.b[z] |= ovar.b[z];
-			}
-			break;
 		}
 		for(z=0; z<BITS; z++) {
 			ref.b[z] = (ref.b[z] & ~r1->set.b[z]) |
@@ -1095,149 +1013,13 @@ prop(Reg *r, Bits ref, Bits cal)
 			r1->refbehind.b[z] = ref.b[z];
 			r1->calbehind.b[z] = cal.b[z];
 		}
-		if(r1->active)
+		if(r1->f.active)
 			break;
-		r1->active = 1;
+		r1->f.active = 1;
 	}
-	for(; r != r1; r = r->p1)
-		for(r2 = r->p2; r2 != R; r2 = r2->p2link)
+	for(; r != r1; r = (Reg*)r->f.p1)
+		for(r2 = (Reg*)r->f.p2; r2 != R; r2 = (Reg*)r2->f.p2link)
 			prop(r2, r->refbehind, r->calbehind);
-}
-
-/*
- * find looping structure
- *
- * 1) find reverse postordering
- * 2) find approximate dominators,
- *	the actual dominators if the flow graph is reducible
- *	otherwise, dominators plus some other non-dominators.
- *	See Matthew S. Hecht and Jeffrey D. Ullman,
- *	"Analysis of a Simple Algorithm for Global Data Flow Problems",
- *	Conf.  Record of ACM Symp. on Principles of Prog. Langs, Boston, Massachusetts,
- *	Oct. 1-3, 1973, pp.  207-217.
- * 3) find all nodes with a predecessor dominated by the current node.
- *	such a node is a loop head.
- *	recursively, all preds with a greater rpo number are in the loop
- */
-int32
-postorder(Reg *r, Reg **rpo2r, int32 n)
-{
-	Reg *r1;
-
-	r->rpo = 1;
-	r1 = r->s1;
-	if(r1 && !r1->rpo)
-		n = postorder(r1, rpo2r, n);
-	r1 = r->s2;
-	if(r1 && !r1->rpo)
-		n = postorder(r1, rpo2r, n);
-	rpo2r[n] = r;
-	n++;
-	return n;
-}
-
-int32
-rpolca(int32 *idom, int32 rpo1, int32 rpo2)
-{
-	int32 t;
-
-	if(rpo1 == -1)
-		return rpo2;
-	while(rpo1 != rpo2){
-		if(rpo1 > rpo2){
-			t = rpo2;
-			rpo2 = rpo1;
-			rpo1 = t;
-		}
-		while(rpo1 < rpo2){
-			t = idom[rpo2];
-			if(t >= rpo2)
-				fatal("bad idom");
-			rpo2 = t;
-		}
-	}
-	return rpo1;
-}
-
-int
-doms(int32 *idom, int32 r, int32 s)
-{
-	while(s > r)
-		s = idom[s];
-	return s == r;
-}
-
-int
-loophead(int32 *idom, Reg *r)
-{
-	int32 src;
-
-	src = r->rpo;
-	if(r->p1 != R && doms(idom, src, r->p1->rpo))
-		return 1;
-	for(r = r->p2; r != R; r = r->p2link)
-		if(doms(idom, src, r->rpo))
-			return 1;
-	return 0;
-}
-
-void
-loopmark(Reg **rpo2r, int32 head, Reg *r)
-{
-	if(r->rpo < head || r->active == head)
-		return;
-	r->active = head;
-	r->loop += LOOP;
-	if(r->p1 != R)
-		loopmark(rpo2r, head, r->p1);
-	for(r = r->p2; r != R; r = r->p2link)
-		loopmark(rpo2r, head, r);
-}
-
-void
-loopit(Reg *r, int32 nr)
-{
-	Reg *r1;
-	int32 i, d, me;
-
-	if(nr > maxnr) {
-		rpo2r = mal(nr * sizeof(Reg*));
-		idom = mal(nr * sizeof(int32));
-		maxnr = nr;
-	}
-	d = postorder(r, rpo2r, 0);
-	if(d > nr)
-		fatal("too many reg nodes");
-	nr = d;
-	for(i = 0; i < nr / 2; i++){
-		r1 = rpo2r[i];
-		rpo2r[i] = rpo2r[nr - 1 - i];
-		rpo2r[nr - 1 - i] = r1;
-	}
-	for(i = 0; i < nr; i++)
-		rpo2r[i]->rpo = i;
-
-	idom[0] = 0;
-	for(i = 0; i < nr; i++){
-		r1 = rpo2r[i];
-		me = r1->rpo;
-		d = -1;
-		// rpo2r[r->rpo] == r protects against considering dead code,
-		// which has r->rpo == 0.
-		if(r1->p1 != R && rpo2r[r1->p1->rpo] == r1->p1 && r1->p1->rpo < me)
-			d = r1->p1->rpo;
-		for(r1 = r1->p2; r1 != nil; r1 = r1->p2link)
-			if(rpo2r[r1->rpo] == r1 && r1->rpo < me)
-				d = rpolca(idom, d, r1->rpo);
-		idom[i] = d;
-	}
-
-	for(i = 0; i < nr; i++){
-		r1 = rpo2r[i];
-		r1->loop++;
-		if(r1->p2 != R && loophead(idom, r1))
-			loopmark(rpo2r, i, r1);
-	}
 }
 
 void
@@ -1246,7 +1028,7 @@ synch(Reg *r, Bits dif)
 	Reg *r1;
 	int z;
 
-	for(r1 = r; r1 != R; r1 = r1->s1) {
+	for(r1 = r; r1 != R; r1 = (Reg*)r1->f.s1) {
 		for(z=0; z<BITS; z++) {
 			dif.b[z] = (dif.b[z] &
 				~(~r1->refbehind.b[z] & r1->refahead.b[z])) |
@@ -1256,13 +1038,13 @@ synch(Reg *r, Bits dif)
 				change++;
 			}
 		}
-		if(r1->active)
+		if(r1->f.active)
 			break;
-		r1->active = 1;
+		r1->f.active = 1;
 		for(z=0; z<BITS; z++)
 			dif.b[z] &= ~(~r1->calbehind.b[z] & r1->calahead.b[z]);
-		if(r1->s2 != R)
-			synch(r1->s2, dif);
+		if(r1->f.s2 != nil)
+			synch((Reg*)r1->f.s2, dif);
 	}
 }
 
@@ -1333,7 +1115,7 @@ paint1(Reg *r, int bn)
 	for(;;) {
 		if(!(r->refbehind.b[z] & bb))
 			break;
-		r1 = r->p1;
+		r1 = (Reg*)r->f.p1;
 		if(r1 == R)
 			break;
 		if(!(r1->refahead.b[z] & bb))
@@ -1344,48 +1126,50 @@ paint1(Reg *r, int bn)
 	}
 
 	if(LOAD(r) & ~(r->set.b[z] & ~(r->use1.b[z]|r->use2.b[z])) & bb) {
-		change -= CLOAD * r->loop;
+		change -= CLOAD * r->f.loop;
 		if(debug['R'] > 1)
-			print("%d%P\td %Q $%d\n", r->loop,
-				r->prog, blsh(bn), change);
+			print("%d%P\td %Q $%d\n", r->f.loop,
+				r->f.prog, blsh(bn), change);
 	}
 	for(;;) {
 		r->act.b[z] |= bb;
-		p = r->prog;
+		p = r->f.prog;
 
-		if(r->use1.b[z] & bb) {
-			change += CREF * r->loop;
-			if(debug['R'] > 1)
-				print("%d%P\tu1 %Q $%d\n", r->loop,
-					p, blsh(bn), change);
-		}
 
-		if((r->use2.b[z]|r->set.b[z]) & bb) {
-			change += CREF * r->loop;
-			if(debug['R'] > 1)
-				print("%d%P\tu2 %Q $%d\n", r->loop,
-					p, blsh(bn), change);
+		if(r->f.prog->as != ANOP) { // don't give credit for NOPs
+			if(r->use1.b[z] & bb) {
+				change += CREF * r->f.loop;
+				if(debug['R'] > 1)
+					print("%d%P\tu1 %Q $%d\n", r->f.loop,
+						p, blsh(bn), change);
+			}
+			if((r->use2.b[z]|r->set.b[z]) & bb) {
+				change += CREF * r->f.loop;
+				if(debug['R'] > 1)
+					print("%d%P\tu2 %Q $%d\n", r->f.loop,
+						p, blsh(bn), change);
+			}
 		}
 
 		if(STORE(r) & r->regdiff.b[z] & bb) {
-			change -= CLOAD * r->loop;
+			change -= CLOAD * r->f.loop;
 			if(debug['R'] > 1)
-				print("%d%P\tst %Q $%d\n", r->loop,
+				print("%d%P\tst %Q $%d\n", r->f.loop,
 					p, blsh(bn), change);
 		}
 
 		if(r->refbehind.b[z] & bb)
-			for(r1 = r->p2; r1 != R; r1 = r1->p2link)
+			for(r1 = (Reg*)r->f.p2; r1 != R; r1 = (Reg*)r1->f.p2link)
 				if(r1->refahead.b[z] & bb)
 					paint1(r1, bn);
 
 		if(!(r->refahead.b[z] & bb))
 			break;
-		r1 = r->s2;
+		r1 = (Reg*)r->f.s2;
 		if(r1 != R)
 			if(r1->refbehind.b[z] & bb)
 				paint1(r1, bn);
-		r = r->s1;
+		r = (Reg*)r->f.s1;
 		if(r == R)
 			break;
 		if(r->act.b[z] & bb)
@@ -1410,7 +1194,7 @@ paint2(Reg *r, int bn)
 	for(;;) {
 		if(!(r->refbehind.b[z] & bb))
 			break;
-		r1 = r->p1;
+		r1 = (Reg*)r->f.p1;
 		if(r1 == R)
 			break;
 		if(!(r1->refahead.b[z] & bb))
@@ -1425,17 +1209,17 @@ paint2(Reg *r, int bn)
 		vreg |= r->regu;
 
 		if(r->refbehind.b[z] & bb)
-			for(r1 = r->p2; r1 != R; r1 = r1->p2link)
+			for(r1 = (Reg*)r->f.p2; r1 != R; r1 = (Reg*)r1->f.p2link)
 				if(r1->refahead.b[z] & bb)
 					vreg |= paint2(r1, bn);
 
 		if(!(r->refahead.b[z] & bb))
 			break;
-		r1 = r->s2;
+		r1 = (Reg*)r->f.s2;
 		if(r1 != R)
 			if(r1->refbehind.b[z] & bb)
 				vreg |= paint2(r1, bn);
-		r = r->s1;
+		r = (Reg*)r->f.s1;
 		if(r == R)
 			break;
 		if(!(r->act.b[z] & bb))
@@ -1461,7 +1245,7 @@ paint3(Reg *r, int bn, int32 rb, int rn)
 	for(;;) {
 		if(!(r->refbehind.b[z] & bb))
 			break;
-		r1 = r->p1;
+		r1 = (Reg*)r->f.p1;
 		if(r1 == R)
 			break;
 		if(!(r1->refahead.b[z] & bb))
@@ -1476,7 +1260,7 @@ paint3(Reg *r, int bn, int32 rb, int rn)
 
 	for(;;) {
 		r->act.b[z] |= bb;
-		p = r->prog;
+		p = r->f.prog;
 
 		if(r->use1.b[z] & bb) {
 			if(debug['R'])
@@ -1498,17 +1282,17 @@ paint3(Reg *r, int bn, int32 rb, int rn)
 		r->regu |= rb;
 
 		if(r->refbehind.b[z] & bb)
-			for(r1 = r->p2; r1 != R; r1 = r1->p2link)
+			for(r1 = (Reg*)r->f.p2; r1 != R; r1 = (Reg*)r1->f.p2link)
 				if(r1->refahead.b[z] & bb)
 					paint3(r1, bn, rb, rn);
 
 		if(!(r->refahead.b[z] & bb))
 			break;
-		r1 = r->s2;
+		r1 = (Reg*)r->f.s2;
 		if(r1 != R)
 			if(r1->refbehind.b[z] & bb)
 				paint3(r1, bn, rb, rn);
-		r = r->s1;
+		r = (Reg*)r->f.s1;
 		if(r == R)
 			break;
 		if(r->act.b[z] & bb)
@@ -1521,7 +1305,7 @@ paint3(Reg *r, int bn, int32 rb, int rn)
 void
 addreg(Adr *a, int rn)
 {
-	a->sym = 0;
+	a->sym = nil;
 	a->name = D_NONE;
 	a->type = D_REG;
 	a->reg = rn;
@@ -1582,215 +1366,78 @@ BtoF(int32 b)
 	return bitno(b) - 16;
 }
 
-static Sym*	symlist[10];
-
-int
-noreturn(Prog *p)
-{
-	Sym *s;
-	int i;
-
-	if(symlist[0] == S) {
-		symlist[0] = pkglookup("panicindex", runtimepkg);
-		symlist[1] = pkglookup("panicslice", runtimepkg);
-		symlist[2] = pkglookup("throwinit", runtimepkg);
-		symlist[3] = pkglookup("panic", runtimepkg);
-		symlist[4] = pkglookup("panicwrap", runtimepkg);
-	}
-
-	s = p->to.sym;
-	if(s == S)
-		return 0;
-	for(i=0; symlist[i]!=S; i++)
-		if(s == symlist[i])
-			return 1;
-	return 0;
-}
-
 void
-dumpone(Reg *r)
+dumpone(Flow *f, int isreg)
 {
 	int z;
 	Bits bit;
+	Reg *r;
 
-	print("%d:%P", r->loop, r->prog);
-	for(z=0; z<BITS; z++)
-		bit.b[z] =
-			r->set.b[z] |
-			r->use1.b[z] |
-			r->use2.b[z] |
-			r->refbehind.b[z] |
-			r->refahead.b[z] |
-			r->calbehind.b[z] |
-			r->calahead.b[z] |
-			r->regdiff.b[z] |
-			r->act.b[z] |
-				0;
-	if(bany(&bit)) {
-		print("\t");
-		if(bany(&r->set))
-			print(" s:%Q", r->set);
-		if(bany(&r->use1))
-			print(" u1:%Q", r->use1);
-		if(bany(&r->use2))
-			print(" u2:%Q", r->use2);
-		if(bany(&r->refbehind))
-			print(" rb:%Q ", r->refbehind);
-		if(bany(&r->refahead))
-			print(" ra:%Q ", r->refahead);
-		if(bany(&r->calbehind))
-			print(" cb:%Q ", r->calbehind);
-		if(bany(&r->calahead))
-			print(" ca:%Q ", r->calahead);
-		if(bany(&r->regdiff))
-			print(" d:%Q ", r->regdiff);
-		if(bany(&r->act))
-			print(" a:%Q ", r->act);
+	print("%d:%P", f->loop, f->prog);
+	if(isreg) {
+		r = (Reg*)f;
+		for(z=0; z<BITS; z++)
+			bit.b[z] =
+				r->set.b[z] |
+				r->use1.b[z] |
+				r->use2.b[z] |
+				r->refbehind.b[z] |
+				r->refahead.b[z] |
+				r->calbehind.b[z] |
+				r->calahead.b[z] |
+				r->regdiff.b[z] |
+				r->act.b[z] |
+					0;
+		if(bany(&bit)) {
+			print("\t");
+			if(bany(&r->set))
+				print(" s:%Q", r->set);
+			if(bany(&r->use1))
+				print(" u1:%Q", r->use1);
+			if(bany(&r->use2))
+				print(" u2:%Q", r->use2);
+			if(bany(&r->refbehind))
+				print(" rb:%Q ", r->refbehind);
+			if(bany(&r->refahead))
+				print(" ra:%Q ", r->refahead);
+			if(bany(&r->calbehind))
+				print(" cb:%Q ", r->calbehind);
+			if(bany(&r->calahead))
+				print(" ca:%Q ", r->calahead);
+			if(bany(&r->regdiff))
+				print(" d:%Q ", r->regdiff);
+			if(bany(&r->act))
+				print(" a:%Q ", r->act);
+		}
 	}
 	print("\n");
 }
 
 void
-dumpit(char *str, Reg *r0)
+dumpit(char *str, Flow *r0, int isreg)
 {
-	Reg *r, *r1;
+	Flow *r, *r1;
 
 	print("\n%s\n", str);
-	for(r = r0; r != R; r = r->link) {
-		dumpone(r);
+	for(r = r0; r != nil; r = r->link) {
+		dumpone(r, isreg);
 		r1 = r->p2;
-		if(r1 != R) {
+		if(r1 != nil) {
 			print("	pred:");
-			for(; r1 != R; r1 = r1->p2link)
-				print(" %.4ud", r1->prog->loc);
+			for(; r1 != nil; r1 = r1->p2link)
+				print(" %.4ud", (int)r1->prog->pc);
+			if(r->p1 != nil)
+				print(" (and %.4ud)", (int)r->p1->prog->pc);
+			else
+				print(" (only)");
 			print("\n");
 		}
 //		r1 = r->s1;
-//		if(r1 != R) {
+//		if(r1 != nil) {
 //			print("	succ:");
 //			for(; r1 != R; r1 = r1->s1)
-//				print(" %.4ud", r1->prog->loc);
+//				print(" %.4ud", (int)r1->prog->pc);
 //			print("\n");
 //		}
-	}
-}
-
-/*
- * the code generator depends on being able to write out JMP (B)
- * instructions that it can jump to now but fill in later.
- * the linker will resolve them nicely, but they make the code
- * longer and more difficult to follow during debugging.
- * remove them.
- */
-
-/* what instruction does a JMP to p eventually land on? */
-static Prog*
-chasejmp(Prog *p, int *jmploop)
-{
-	int n;
-
-	n = 0;
-	while(p != P && p->as == AB && p->to.type == D_BRANCH) {
-		if(++n > 10) {
-			*jmploop = 1;
-			break;
-		}
-		p = p->to.u.branch;
-	}
-	return p;
-}
-
-/*
- * reuse reg pointer for mark/sweep state.
- * leave reg==nil at end because alive==nil.
- */
-#define alive ((void*)0)
-#define dead ((void*)1)
-
-/* mark all code reachable from firstp as alive */
-static void
-mark(Prog *firstp)
-{
-	Prog *p;
-	
-	for(p=firstp; p; p=p->link) {
-		if(p->regp != dead)
-			break;
-		p->regp = alive;
-		if(p->as != ABL && p->to.type == D_BRANCH && p->to.u.branch)
-			mark(p->to.u.branch);
-		if(p->as == AB || p->as == ARET || (p->as == ABL && noreturn(p)))
-			break;
-	}
-}
-
-static void
-fixjmp(Prog *firstp)
-{
-	int jmploop;
-	Prog *p, *last;
-	
-	if(debug['R'] && debug['v'])
-		print("\nfixjmp\n");
-
-	// pass 1: resolve jump to B, mark all code as dead.
-	jmploop = 0;
-	for(p=firstp; p; p=p->link) {
-		if(debug['R'] && debug['v'])
-			print("%P\n", p);
-		if(p->as != ABL && p->to.type == D_BRANCH && p->to.u.branch && p->to.u.branch->as == AB) {
-			p->to.u.branch = chasejmp(p->to.u.branch, &jmploop);
-			if(debug['R'] && debug['v'])
-				print("->%P\n", p);
-		}
-		p->regp = dead;
-	}
-	if(debug['R'] && debug['v'])
-		print("\n");
-	
-	// pass 2: mark all reachable code alive
-	mark(firstp);
-	
-	// pass 3: delete dead code (mostly JMPs).
-	last = nil;
-	for(p=firstp; p; p=p->link) {
-		if(p->regp == dead) {
-			if(p->link == P && p->as == ARET && last && last->as != ARET) {
-				// This is the final ARET, and the code so far doesn't have one.
-				// Let it stay.
-			} else {
-				if(debug['R'] && debug['v'])
-					print("del %P\n", p);
-				continue;
-			}
-		}
-		if(last)
-			last->link = p;
-		last = p;
-	}
-	last->link = P;
-	
-	// pass 4: elide JMP to next instruction.
-	// only safe if there are no jumps to JMPs anymore.
-	if(!jmploop) {
-		last = nil;
-		for(p=firstp; p; p=p->link) {
-			if(p->as == AB && p->to.type == D_BRANCH && p->to.u.branch == p->link) {
-				if(debug['R'] && debug['v'])
-					print("del %P\n", p);
-				continue;
-			}
-			if(last)
-				last->link = p;
-			last = p;
-		}
-		last->link = P;
-	}
-	
-	if(debug['R'] && debug['v']) {
-		print("\n");
-		for(p=firstp; p; p=p->link)
-			print("%P\n", p);
-		print("\n");
 	}
 }

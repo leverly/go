@@ -23,12 +23,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#include "../../cmd/ld/textflag.h"
+
 /*
  * C runtime for 64-bit divide, others.
  *
  * TODO(rsc): The simple functions are dregs--8c knows how
  * to generate the code directly now.  Find and remove.
  */
+
+extern void runtime·panicdivide(void);
 
 typedef	unsigned long	ulong;
 typedef	unsigned int	uint;
@@ -145,7 +149,7 @@ _v2f(Vlong x)
 }
 
 ulong	_div64by32(Vlong, ulong, ulong*);
-void	_mul64by32(Vlong*, Vlong, ulong);
+int	_mul64by32(Vlong*, Vlong, ulong);
 
 static void
 slowdodiv(Vlong num, Vlong den, Vlong *q, Vlong *r)
@@ -230,8 +234,7 @@ dodiv(Vlong num, Vlong den, Vlong *qp, Vlong *rp)
 	if(den.hi != 0){
 		q.hi = 0;
 		n = num.hi/den.hi;
-		_mul64by32(&x, den, n);
-		if(x.hi > num.hi || (x.hi == num.hi && x.lo > num.lo))
+		if(_mul64by32(&x, den, n) || x.hi > num.hi || (x.hi == num.hi && x.lo > num.lo))
 			slowdodiv(num, den, &q, &r);
 		else {
 			q.lo = n;
@@ -239,6 +242,8 @@ dodiv(Vlong num, Vlong den, Vlong *qp, Vlong *rp)
 		}
 	} else {
 		if(num.hi >= den.lo){
+			if(den.lo == 0)
+				runtime·panicdivide();
 			q.hi = n = num.hi/den.lo;
 			num.hi -= den.lo*n;
 		} else {
@@ -262,6 +267,8 @@ _divvu(Vlong *q, Vlong n, Vlong d)
 {
 
 	if(n.hi == 0 && d.hi == 0) {
+		if(d.lo == 0)
+			runtime·panicdivide();
 		q->hi = 0;
 		q->lo = n.lo / d.lo;
 		return;
@@ -280,6 +287,8 @@ _modvu(Vlong *r, Vlong n, Vlong d)
 {
 
 	if(n.hi == 0 && d.hi == 0) {
+		if(d.lo == 0)
+			runtime·panicdivide();
 		r->hi = 0;
 		r->lo = n.lo % d.lo;
 		return;
@@ -318,6 +327,8 @@ _divv(Vlong *q, Vlong n, Vlong d)
 			q->hi = 0;
 			return;
 		}
+		if(d.lo == 0)
+			runtime·panicdivide();
 		q->lo = (long)n.lo / (long)d.lo;
 		q->hi = ((long)q->lo) >> 31;
 		return;
@@ -352,6 +363,8 @@ _modv(Vlong *r, Vlong n, Vlong d)
 			r->hi = 0;
 			return;
 		}
+		if(d.lo == 0)
+			runtime·panicdivide();
 		r->lo = (long)n.lo % (long)d.lo;
 		r->hi = ((long)r->lo) >> 31;
 		return;
@@ -423,6 +436,7 @@ _rshlv(Vlong *r, Vlong a, int b)
 	r->lo = (t << (32-b)) | (a.lo >> b);
 }
 
+#pragma textflag NOSPLIT
 void
 _lshv(Vlong *r, Vlong a, int b)
 {

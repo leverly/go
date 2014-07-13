@@ -33,15 +33,6 @@ runtime·parforalloc(uint32 nthrmax)
 	return desc;
 }
 
-// For testing from Go
-// func parforalloc2(nthrmax uint32) *ParFor
-void
-runtime·parforalloc2(uint32 nthrmax, ParFor *desc)
-{
-	desc = runtime·parforalloc(nthrmax);
-	FLUSH(&desc);
-}
-
 void
 runtime·parforsetup(ParFor *desc, uint32 nthr, uint32 n, void *ctx, bool wait, void (*body)(ParFor*, uint32))
 {
@@ -73,14 +64,6 @@ runtime·parforsetup(ParFor *desc, uint32 nthr, uint32 n, void *ctx, bool wait, 
 			runtime·throw("parforsetup: pos is not aligned");
 		*pos = (uint64)begin | (((uint64)end)<<32);
 	}
-}
-
-// For testing from Go
-// func parforsetup2(desc *ParFor, nthr, n uint32, ctx *byte, wait bool, body func(*ParFor, uint32))
-void
-runtime·parforsetup2(ParFor *desc, uint32 nthr, uint32 n, void *ctx, bool wait, void *body)
-{
-	runtime·parforsetup(desc, nthr, n, ctx, wait, *(void(**)(ParFor*, uint32))body);
 }
 
 void
@@ -144,9 +127,9 @@ runtime·parfordo(ParFor *desc)
 			if(victim >= tid)
 				victim++;
 			victimpos = &desc->thr[victim].pos;
-			pos = runtime·atomicload64(victimpos);
 			for(;;) {
 				// See if it has any work.
+				pos = runtime·atomicload64(victimpos);
 				begin = (uint32)pos;
 				end = (uint32)(pos>>32);
 				if(begin+1 >= end) {
@@ -159,7 +142,7 @@ runtime·parfordo(ParFor *desc)
 				}
 				begin2 = begin + (end-begin)/2;
 				newpos = (uint64)begin | (uint64)begin2<<32;
-				if(runtime·cas64(victimpos, &pos, newpos)) {
+				if(runtime·cas64(victimpos, pos, newpos)) {
 					begin = begin2;
 					break;
 				}
@@ -207,13 +190,10 @@ exit:
 	me->nsleep = 0;
 }
 
-// For testing from Go
-// func parforiters(desc *ParFor, tid uintptr) (uintptr, uintptr)
+// For testing from Go.
 void
-runtime·parforiters(ParFor *desc, uintptr tid, uintptr start, uintptr end)
+runtime·parforiters(ParFor *desc, uintptr tid, uintptr *start, uintptr *end)
 {
-	start = (uint32)desc->thr[tid].pos;
-	end = (uint32)(desc->thr[tid].pos>>32);
-	FLUSH(&start);
-	FLUSH(&end);
+	*start = (uint32)desc->thr[tid].pos;
+	*end = (uint32)(desc->thr[tid].pos>>32);
 }

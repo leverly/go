@@ -16,7 +16,6 @@ The commands are:
 
     build       compile packages and dependencies
     clean       remove object files
-    doc         run godoc on package sources
     env         print Go environment information
     fix         run go tool fix on packages
     fmt         run gofmt on package sources
@@ -33,9 +32,11 @@ Use "go help [command]" for more information about a command.
 
 Additional help topics:
 
+    c           calling between Go and C
+    filetype    file types
     gopath      GOPATH environment variable
+    importpath  import path syntax
     packages    description of package lists
-    remote      remote import path syntax
     testflag    description of testing flags
     testfunc    description of testing functions
 
@@ -46,7 +47,7 @@ Compile packages and dependencies
 
 Usage:
 
-	go build [-o output] [build flags] [packages]
+	go build [-o output] [-i] [build flags] [packages]
 
 Build compiles the packages named by the import paths,
 along with their dependencies, but it does not install the results.
@@ -67,7 +68,10 @@ derives from the first file name mentioned, such as f1 for 'go build
 f1.go f2.go'; with no files provided ('go build'), the output file
 name is the base name of the containing directory.
 
-The build flags are shared by the build, install, run, and test commands:
+The -i flag installs the packages that are dependencies of the target.
+
+The build flags are shared by the build, clean, get, install, list, run,
+and test commands:
 
 	-a
 		force rebuilding of packages that are already up-to-date.
@@ -104,15 +108,16 @@ The build flags are shared by the build, install, run, and test commands:
 		arguments to pass on each 5l, 6l, or 8l linker invocation.
 	-tags 'tag list'
 		a list of build tags to consider satisfied during the build.
-		See the documentation for the go/build package for
-		more information about build tags.
+		For more information about build tags, see the description of
+		build constraints in the documentation for the go/build package.
 
 The list flags accept a space-separated list of strings. To embed spaces
 in an element in the list, surround it with either single or double quotes.
 
 For more about specifying packages, see 'go help packages'.
 For more about where packages and binaries are installed,
-see 'go help gopath'.
+run 'go help gopath'.  For more about calling between Go and C/C++,
+run 'go help c'.
 
 See also: go install, go get, go clean.
 
@@ -121,7 +126,7 @@ Remove object files
 
 Usage:
 
-	go clean [-i] [-r] [-n] [-x] [packages]
+	go clean [-i] [-r] [-n] [-x] [build flags] [packages]
 
 Clean removes object files from package source directories.
 The go command builds most objects in a temporary directory,
@@ -159,27 +164,9 @@ dependencies of the packages named by the import paths.
 
 The -x flag causes clean to print remove commands as it executes them.
 
+For more about build flags, see 'go help build'.
+
 For more about specifying packages, see 'go help packages'.
-
-
-Run godoc on package sources
-
-Usage:
-
-	go doc [-n] [-x] [packages]
-
-Doc runs the godoc command on the packages named by the
-import paths.
-
-For more about godoc, see 'godoc godoc'.
-For more about specifying packages, see 'go help packages'.
-
-The -n flag prints commands that would be executed.
-The -x flag prints commands as they are executed.
-
-To run godoc with specific options, run godoc itself.
-
-See also: go fix, go fmt, go vet.
 
 
 Print Go environment information
@@ -229,14 +216,14 @@ The -x flag prints commands as they are executed.
 
 To run gofmt with specific options, run gofmt itself.
 
-See also: go doc, go fix, go vet.
+See also: go fix, go vet.
 
 
 Download and install packages and dependencies
 
 Usage:
 
-	go get [-d] [-fix] [-u] [build flags] [packages]
+	go get [-d] [-fix] [-t] [-u] [build flags] [packages]
 
 Get downloads and installs the packages named by the import paths,
 along with their dependencies.
@@ -247,12 +234,14 @@ it instructs get not to install the packages.
 The -fix flag instructs get to run the fix tool on the downloaded packages
 before resolving dependencies or building the code.
 
+The -t flag instructs get to also download the packages required to build
+the tests for the specified packages.
+
 The -u flag instructs get to use the network to update the named packages
 and their dependencies.  By default, get uses the network to check out
 missing packages but does not use it to look for updates to existing packages.
 
-Get also accepts all the flags in the 'go build' and 'go install' commands,
-to control the installation. See 'go help build'.
+Get also accepts build flags to control the installation. See 'go help build'.
 
 When checking out or updating a package, get looks for a branch or tag
 that matches the locally installed version of Go. The most important
@@ -263,7 +252,7 @@ retrieves the most recent version of the package.
 For more about specifying packages, see 'go help packages'.
 
 For more about how 'go get' finds source code to
-download, see 'go help remote'.
+download, see 'go help importpath'.
 
 See also: go build, go install, go clean.
 
@@ -287,7 +276,7 @@ List packages
 
 Usage:
 
-	go list [-e] [-f format] [-json] [-tags 'tag list'] [packages]
+	go list [-e] [-f format] [-json] [build flags] [packages]
 
 List lists the packages named by the import paths, one per line.
 
@@ -299,8 +288,7 @@ The default output shows the package import path:
 
 The -f flag specifies an alternate format for the list, using the
 syntax of package template.  The default output is equivalent to -f
-'{{.ImportPath}}'.  One extra template function is available, "join",
-which calls strings.Join. The struct being passed to the template is:
+'{{.ImportPath}}'. The struct being passed to the template is:
 
     type Package struct {
         Dir        string // directory containing package sources
@@ -318,14 +306,18 @@ which calls strings.Join. The struct being passed to the template is:
         CgoFiles []string       // .go sources files that import "C"
         IgnoredGoFiles []string // .go sources ignored due to build constraints
         CFiles   []string       // .c source files
-        HFiles   []string       // .h source files
+        CXXFiles []string       // .cc, .cxx and .cpp source files
+        MFiles   []string       // .m source files
+        HFiles   []string       // .h, .hh, .hpp and .hxx source files
         SFiles   []string       // .s source files
-        SysoFiles []string      // .syso object files to add to archive
         SwigFiles []string      // .swig files
         SwigCXXFiles []string   // .swigcxx files
+        SysoFiles []string      // .syso object files to add to archive
 
         // Cgo directives
         CgoCFLAGS    []string // cgo: flags for C compiler
+        CgoCPPFLAGS  []string // cgo: flags for C preprocessor
+        CgoCXXFLAGS  []string // cgo: flags for C++ compiler
         CgoLDFLAGS   []string // cgo: flags for linker
         CgoPkgConfig []string // cgo: pkg-config names
 
@@ -344,6 +336,26 @@ which calls strings.Join. The struct being passed to the template is:
         XTestImports []string // imports from XTestGoFiles
     }
 
+The template function "join" calls strings.Join.
+
+The template function "context" returns the build context, defined as:
+
+	type Context struct {
+		GOARCH        string   // target architecture
+		GOOS          string   // target operating system
+		GOROOT        string   // Go root
+		GOPATH        string   // Go path
+		CgoEnabled    bool     // whether cgo can be used
+		UseAllFiles   bool     // use files regardless of +build lines, file names
+		Compiler      string   // compiler to assume when computing target paths
+		BuildTags     []string // build constraints to match in +build lines
+		ReleaseTags   []string // releases the current release is compatible with
+		InstallSuffix string   // suffix to use in the name of the install dir
+	}
+
+For more information about the meaning of these fields see the documentation
+for the go/build package's Context type.
+
 The -json flag causes the package data to be printed in JSON format
 instead of using the template format.
 
@@ -357,8 +369,7 @@ printing.  Erroneous packages will have a non-empty ImportPath and
 a non-nil Error field; other information may or may not be missing
 (zeroed).
 
-The -tags flag specifies a list of build tags, like in the 'go build'
-command.
+For more about build flags, see 'go help build'.
 
 For more about specifying packages, see 'go help packages'.
 
@@ -367,10 +378,19 @@ Compile and run Go program
 
 Usage:
 
-	go run [build flags] gofiles... [arguments...]
+	go run [build flags] [-exec xprog] gofiles... [arguments...]
 
 Run compiles and runs the main package comprising the named Go source files.
-If no files are named, it compiles and runs all non-test Go source files.
+A Go source file is defined to be a file ending in a literal ".go" suffix.
+
+By default, 'go run' runs the compiled binary directly: 'a.out arguments...'.
+If the -exec flag is given, 'go run' invokes the binary using xprog: 'xprog a.out arguments...'.
+If the -exec flag is not given, GOOS or GOARCH is different from the system
+default, and a program named go_$GOOS_$GOARCH_exec can be found
+on the current search path, 'go run' invokes the binary using that program,
+for example 'go_nacl_386_exec a.out arguments...'. This allows execution of
+cross-compiled programs when a simulator or other execution method is
+available.
 
 For more about build flags, see 'go help build'.
 
@@ -381,7 +401,7 @@ Test packages
 
 Usage:
 
-	go test [-c] [-i] [build flags] [packages] [flags for test binary]
+	go test [-c] [-i] [build and test flags] [packages] [flags for test binary]
 
 'Go test' automates testing the packages named by the import paths.
 It prints a summary of the test results in the format:
@@ -394,8 +414,10 @@ It prints a summary of the test results in the format:
 followed by detailed output for each failed package.
 
 'Go test' recompiles each package along with any files with names matching
-the file pattern "*_test.go".  These additional files can contain test functions,
-benchmark functions, and example functions.  See 'go help testfunc' for more.
+the file pattern "*_test.go".
+Files whose names begin with "_" (including "_test.go") or "." are ignored.
+These additional files can contain test functions, benchmark functions, and
+example functions.  See 'go help testfunc' for more.
 Each listed package causes the execution of a separate test binary.
 
 Test files that declare a package with the suffix "_test" will be compiled as a
@@ -416,8 +438,17 @@ In addition to the build flags, the flags handled by 'go test' itself are:
 	    Install packages that are dependencies of the test.
 	    Do not run the test.
 
+	-exec xprog
+	    Run the test binary using xprog. The behavior is the same as
+	    in 'go run'. See 'go help run' for details.
+
 The test binary also accepts flags that control execution of the test; these
 flags are also accessible by 'go test'.  See 'go help testflag' for details.
+
+If the test binary needs any other flags, they should be presented after the
+package names. The go tool treats as a flag the first argument that begins with
+a minus sign that it does not recognize itself; that argument and all subsequent
+arguments are passed as arguments to the test binary.
 
 For more about build flags, see 'go help build'.
 For more about specifying packages, see 'go help packages'.
@@ -457,7 +488,7 @@ Usage:
 
 Vet runs the Go vet command on the packages named by the import paths.
 
-For more about vet, see 'godoc vet'.
+For more about vet, see 'godoc code.google.com/p/go.tools/cmd/vet'.
 For more about specifying packages, see 'go help packages'.
 
 To run the vet tool with specific options, run 'go tool vet'.
@@ -466,6 +497,62 @@ The -n flag prints commands that would be executed.
 The -x flag prints commands as they are executed.
 
 See also: go fmt, go fix.
+
+
+Calling between Go and C
+
+There are two different ways to call between Go and C/C++ code.
+
+The first is the cgo tool, which is part of the Go distribution.  For
+information on how to use it see the cgo documentation (godoc cmd/cgo).
+
+The second is the SWIG program, which is a general tool for
+interfacing between languages.  For information on SWIG see
+http://swig.org/.  When running go build, any file with a .swig
+extension will be passed to SWIG.  Any file with a .swigcxx extension
+will be passed to SWIG with the -c++ option.
+
+When either cgo or SWIG is used, go build will pass any .c, .m, .s,
+or .S files to the C compiler, and any .cc, .cpp, .cxx files to the C++
+compiler.  The CC or CXX environment variables may be set to determine
+the C or C++ compiler, respectively, to use.
+
+
+File types
+
+The go command examines the contents of a restricted set of files
+in each directory. It identifies which files to examine based on
+the extension of the file name. These extensions are:
+
+	.go
+		Go source files.
+	.c, .h
+		C source files.
+		If the package uses cgo, these will be compiled with the
+		OS-native compiler (typically gcc); otherwise they will be
+		compiled with the Go-specific support compiler,
+		5c, 6c, or 8c, etc. as appropriate.
+	.cc, .cpp, .cxx, .hh, .hpp, .hxx
+		C++ source files. Only useful with cgo or SWIG, and always
+		compiled with the OS-native compiler.
+	.m
+		Objective-C source files. Only useful with cgo, and always
+		compiled with the OS-native compiler.
+	.s, .S
+		Assembler source files.
+		If the package uses cgo, these will be assembled with the
+		OS-native assembler (typically gcc (sic)); otherwise they
+		will be assembled with the Go-specific support assembler,
+		5a, 6a, or 8a, etc., as appropriate.
+	.swig, .swigcxx
+		SWIG definition files.
+	.syso
+		System object files.
+
+Files of each of these types except .syso may contain build
+constraints, but the go command stops scanning for build constraints
+at the first item in the file that is not a blank line or //-style
+line comment.
 
 
 GOPATH environment variable
@@ -528,59 +615,40 @@ but new packages are always downloaded into the first directory
 in the list.
 
 
-Description of package lists
-
-Many commands apply to a set of packages:
-
-	go action [packages]
-
-Usually, [packages] is a list of import paths.
-
-An import path that is a rooted path or that begins with
-a . or .. element is interpreted as a file system path and
-denotes the package in that directory.
-
-Otherwise, the import path P denotes the package found in
-the directory DIR/src/P for some DIR listed in the GOPATH
-environment variable (see 'go help gopath').
-
-If no import paths are given, the action applies to the
-package in the current directory.
-
-The special import path "all" expands to all package directories
-found in all the GOPATH trees.  For example, 'go list all'
-lists all the packages on the local system.
-
-The special import path "std" is like all but expands to just the
-packages in the standard Go library.
-
-An import path is a pattern if it includes one or more "..." wildcards,
-each of which can match any string, including the empty string and
-strings containing slashes.  Such a pattern expands to all package
-directories found in the GOPATH trees with names matching the
-patterns.  As a special case, x/... matches x as well as x's subdirectories.
-For example, net/... expands to net and packages in its subdirectories.
-
-An import path can also name a package to be downloaded from
-a remote repository.  Run 'go help remote' for details.
-
-Every package in a program must have a unique import path.
-By convention, this is arranged by starting each path with a
-unique prefix that belongs to you.  For example, paths used
-internally at Google all begin with 'google', and paths
-denoting remote repositories begin with the path to the code,
-such as 'code.google.com/p/project'.
-
-As a special case, if the package list is a list of .go files from a
-single directory, the command is applied to a single synthesized
-package made up of exactly those files, ignoring any build constraints
-in those files and ignoring any other files in the directory.
-
-
-Remote import path syntax
+Import path syntax
 
 An import path (see 'go help packages') denotes a package
-stored in the local file system.  Certain import paths also
+stored in the local file system.  In general, an import path denotes
+either a standard package (such as "unicode/utf8") or a package
+found in one of the work spaces (see 'go help gopath').
+
+Relative import paths
+
+An import path beginning with ./ or ../ is called a relative path.
+The toolchain supports relative import paths as a shortcut in two ways.
+
+First, a relative path can be used as a shorthand on the command line.
+If you are working in the directory containing the code imported as
+"unicode" and want to run the tests for "unicode/utf8", you can type
+"go test ./utf8" instead of needing to specify the full path.
+Similarly, in the reverse situation, "go test .." will test "unicode" from
+the "unicode/utf8" directory. Relative patterns are also allowed, like
+"go test ./..." to test all subdirectories. See 'go help packages' for details
+on the pattern syntax.
+
+Second, if you are compiling a Go program not in a work space,
+you can use a relative path in an import statement in that program
+to refer to nearby code also not in a work space.
+This makes it easy to experiment with small multipackage programs
+outside of the usual work spaces, but such programs cannot be
+installed with "go install" (there is no work space in which to install them),
+so they are rebuilt from scratch each time they are built.
+To avoid ambiguity, Go programs cannot use relative import paths
+within a work space.
+
+Remote import paths
+
+Certain import paths also
 describe how to obtain the source code for the package using
 a revision control system.
 
@@ -641,7 +709,7 @@ example.org/user/foo or foo.hg, and
 	import "example.org/repo.git/foo/bar"
 
 denotes the foo/bar directory of the Git repository at
-example.com/repo or repo.git.
+example.org/repo or repo.git.
 
 When a version control system supports multiple protocols,
 each is tried in turn when downloading.  For example, a Git
@@ -691,6 +759,62 @@ package appropriate for the Go release being used.
 Run 'go help install' for more.
 
 
+Description of package lists
+
+Many commands apply to a set of packages:
+
+	go action [packages]
+
+Usually, [packages] is a list of import paths.
+
+An import path that is a rooted path or that begins with
+a . or .. element is interpreted as a file system path and
+denotes the package in that directory.
+
+Otherwise, the import path P denotes the package found in
+the directory DIR/src/P for some DIR listed in the GOPATH
+environment variable (see 'go help gopath').
+
+If no import paths are given, the action applies to the
+package in the current directory.
+
+There are three reserved names for paths that should not be used
+for packages to be built with the go tool:
+
+- "main" denotes the top-level package in a stand-alone executable.
+
+- "all" expands to all package directories found in all the GOPATH
+trees. For example, 'go list all' lists all the packages on the local
+system.
+
+- "std" is like all but expands to just the packages in the standard
+Go library.
+
+An import path is a pattern if it includes one or more "..." wildcards,
+each of which can match any string, including the empty string and
+strings containing slashes.  Such a pattern expands to all package
+directories found in the GOPATH trees with names matching the
+patterns.  As a special case, x/... matches x as well as x's subdirectories.
+For example, net/... expands to net and packages in its subdirectories.
+
+An import path can also name a package to be downloaded from
+a remote repository.  Run 'go help importpath' for details.
+
+Every package in a program must have a unique import path.
+By convention, this is arranged by starting each path with a
+unique prefix that belongs to you.  For example, paths used
+internally at Google all begin with 'google', and paths
+denoting remote repositories begin with the path to the code,
+such as 'code.google.com/p/project'.
+
+As a special case, if the package list is a list of .go files from a
+single directory, the command is applied to a single synthesized
+package made up of exactly those files, ignoring any build constraints
+in those files and ignoring any other files in the directory.
+
+File names that begin with "." or "_" are ignored by the go tool.
+
+
 Description of testing flags
 
 The 'go test' command takes both flags that apply to 'go test' itself
@@ -730,6 +854,31 @@ control the execution of any test:
 	    if -test.blockprofile is set without this flag, all blocking events
 	    are recorded, equivalent to -test.blockprofilerate=1.
 
+	-cover
+	    Enable coverage analysis.
+
+	-covermode set,count,atomic
+	    Set the mode for coverage analysis for the package[s]
+	    being tested. The default is "set" unless -race is enabled,
+	    in which case it is "atomic".
+	    The values:
+		set: bool: does this statement run?
+		count: int: how many times does this statement run?
+		atomic: int: count, but correct in multithreaded tests;
+			significantly more expensive.
+	    Sets -cover.
+
+	-coverpkg pkg1,pkg2,pkg3
+	    Apply coverage analysis in each test to the given list of packages.
+	    The default is for each test to analyze only the package being tested.
+	    Packages are specified as import paths.
+	    Sets -cover.
+
+	-coverprofile cover.out
+	    Write a coverage profile to the specified file after all tests
+	    have passed.
+	    Sets -cover.
+
 	-cpu 1,2,4
 	    Specify a list of GOMAXPROCS values for which the tests or
 	    benchmarks should be executed.  The default is the current value
@@ -746,9 +895,11 @@ control the execution of any test:
 	    Enable more precise (and expensive) memory profiles by setting
 	    runtime.MemProfileRate.  See 'godoc runtime MemProfileRate'.
 	    To profile all memory allocations, use -test.memprofilerate=1
-	    and set the environment variable GOGC=off to disable the
-	    garbage collector, provided the test can run in the available
-	    memory without garbage collection.
+	    and pass --alloc_space flag to the pprof tool.
+
+	-outputdir directory
+	    Place output files from profiling in the specified directory,
+	    by default the directory in which "go test" is running.
 
 	-parallel n
 	    Allow parallel execution of test functions that call t.Parallel.
@@ -787,8 +938,8 @@ will compile the test binary and then run it as
 
 	pkg.test -test.v -test.cpuprofile=prof.out -dir=testdata -update
 
-The test flags that generate profiles also leave the test binary in pkg.test
-for use when analyzing the profiles.
+The test flags that generate profiles (other than for coverage) also
+leave the test binary in pkg.test for use when analyzing the profiles.
 
 Flags not recognized by 'go test' must be placed after any specified packages.
 
@@ -837,5 +988,3 @@ See the documentation of the testing package for more information.
 
 */
 package main
-
-// NOTE: cmdDoc is in fmt.go.

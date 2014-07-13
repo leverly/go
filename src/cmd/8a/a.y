@@ -33,6 +33,7 @@
 #include <stdio.h>	/* if we don't, bison will, and a.h re-#defines getc */
 #include <libc.h>
 #include "a.h"
+#include "../../pkg/runtime/funcdata.h"
 %}
 %union	{
 	Sym	*sym;
@@ -43,8 +44,8 @@
 	} con2;
 	double	dval;
 	char	sval[8];
-	Gen	gen;
-	Gen2	gen2;
+	Addr	addr;
+	Addr2	addr2;
 }
 %left	'|'
 %left	'^'
@@ -54,16 +55,16 @@
 %left	'*' '/' '%'
 %token	<lval>	LTYPE0 LTYPE1 LTYPE2 LTYPE3 LTYPE4
 %token	<lval>	LTYPEC LTYPED LTYPEN LTYPER LTYPET LTYPES LTYPEM LTYPEI LTYPEG LTYPEXC
-%token	<lval>	LTYPEX LCONST LFP LPC LSB
+%token	<lval>	LTYPEX LTYPEPC LTYPEF LCONST LFP LPC LSB
 %token	<lval>	LBREG LLREG LSREG LFREG LXREG
 %token	<dval>	LFCONST
 %token	<sval>	LSCONST LSP
 %token	<sym>	LNAME LLAB LVAR
 %type	<lval>	con expr pointer offset
 %type	<con2>	con2
-%type	<gen>	mem imm imm2 reg nam rel rem rim rom omem nmem
-%type	<gen2>	nonnon nonrel nonrem rimnon rimrem remrim
-%type	<gen2>	spec1 spec2 spec3 spec4 spec5 spec6 spec7 spec8 spec9 spec10
+%type	<addr>	mem imm imm2 reg nam rel rem rim rom omem nmem
+%type	<addr2>	nonnon nonrel nonrem rimnon rimrem remrim
+%type	<addr2>	spec1 spec2 spec3 spec4 spec5 spec6 spec7 spec8 spec9 spec10 spec11 spec12
 %%
 prog:
 |	prog
@@ -118,6 +119,8 @@ inst:
 |	LTYPEG spec8	{ outcode($1, &$2); }
 |	LTYPEXC spec9	{ outcode($1, &$2); }
 |	LTYPEX spec10	{ outcode($1, &$2); }
+|	LTYPEPC spec11	{ outcode($1, &$2); }
+|	LTYPEF spec12	{ outcode($1, &$2); }
 
 nonnon:
 	{
@@ -307,6 +310,26 @@ spec10:	/* PINSRD */
 		$$.to.offset = $1.offset;
 	}
 
+spec11:	/* PCDATA */
+	rim ',' rim
+	{
+		if($1.type != D_CONST || $3.type != D_CONST)
+			yyerror("arguments to PCDATA must be integer constants");
+		$$.from = $1;
+		$$.to = $3;
+	}
+
+spec12:	/* FUNCDATA */
+	rim ',' rim
+	{
+		if($1.type != D_CONST)
+			yyerror("index for FUNCDATA must be integer constant");
+		if($3.type != D_EXTERN && $3.type != D_STATIC)
+			yyerror("value for FUNCDATA must be symbol reference");
+ 		$$.from = $1;
+ 		$$.to = $3;
+ 	}
+
 rem:
 	reg
 |	mem
@@ -343,14 +366,12 @@ rel:
 		if(pass == 2)
 			yyerror("undefined label: %s", $1->name);
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $2;
 	}
 |	LLAB offset
 	{
 		$$ = nullgen;
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $1->value + $2;
 	}
 
@@ -408,31 +429,31 @@ imm:
 	{
 		$$ = nullgen;
 		$$.type = D_SCONST;
-		memcpy($$.sval, $2, sizeof($$.sval));
+		memcpy($$.u.sval, $2, sizeof($$.u.sval));
 	}
 |	'$' LFCONST
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = $2;
+		$$.u.dval = $2;
 	}
 |	'$' '(' LFCONST ')'
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = $3;
+		$$.u.dval = $3;
 	}
 |	'$' '(' '-' LFCONST ')'
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = -$4;
+		$$.u.dval = -$4;
 	}
 |	'$' '-' LFCONST
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = -$3;
+		$$.u.dval = -$3;
 	}
 
 imm2:
@@ -448,12 +469,12 @@ con2:
 	LCONST
 	{
 		$$.v1 = $1;
-		$$.v2 = 0;
+		$$.v2 = ArgsSizeUnknown;
 	}
 |	'-' LCONST
 	{
 		$$.v1 = -$2;
-		$$.v2 = 0;
+		$$.v2 = ArgsSizeUnknown;
 	}
 |	LCONST '-' LCONST
 	{
@@ -567,14 +588,14 @@ nam:
 	{
 		$$ = nullgen;
 		$$.type = $4;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 0);
 		$$.offset = $2;
 	}
 |	LNAME '<' '>' offset '(' LSB ')'
 	{
 		$$ = nullgen;
 		$$.type = D_STATIC;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 1);
 		$$.offset = $4;
 	}
 

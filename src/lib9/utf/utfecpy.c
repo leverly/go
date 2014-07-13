@@ -11,8 +11,8 @@
  * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
  * OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
  */
-#include <stdarg.h>
-#include <string.h>
+#include <u.h>
+#include <libc.h>
 #include "utf.h"
 #include "utfdef.h"
 
@@ -23,7 +23,7 @@ utfecpy(char *to, char *e, const char *from)
 
 	if(to >= e)
 		return to;
-	end = memccpy(to, from, '\0', e - to);
+	end = memccpy(to, from, '\0', (size_t)(e - to));
 	if(end == nil){
 		end = e-1;
 		while(end>to && (*--end&0xC0)==0x80)

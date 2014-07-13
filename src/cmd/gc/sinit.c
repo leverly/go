@@ -25,10 +25,13 @@ static void init2list(NodeList*, NodeList**);
 static int staticinit(Node*, NodeList**);
 static Node *staticname(Type*, int);
 
+// init1 walks the AST starting at n, and accumulates in out
+// the list of definitions needing init code in dependency order.
 static void
 init1(Node *n, NodeList **out)
 {
 	NodeList *l;
+	Node *nv;
 
 	if(n == N)
 		return;
@@ -50,9 +53,10 @@ init1(Node *n, NodeList **out)
 	case PFUNC:
 		break;
 	default:
-		if(isblank(n) && n->defn != N && n->defn->initorder == InitNotStarted) {
-			n->defn->initorder = InitDone;
-			*out = list(*out, n->defn);
+		if(isblank(n) && n->curfn == N && n->defn != N && n->defn->initorder == InitNotStarted) {
+			// blank names initialization is part of init() but not
+			// when they are inside a function.
+			break;
 		}
 		return;
 	}
@@ -60,9 +64,29 @@ init1(Node *n, NodeList **out)
 	if(n->initorder == InitDone)
 		return;
 	if(n->initorder == InitPending) {
-		if(n->class == PFUNC)
-			return;
-		
+		// Since mutually recursive sets of functions are allowed,
+		// we don't necessarily raise an error if n depends on a node
+		// which is already waiting for its dependencies to be visited.
+		//
+		// initlist contains a cycle of identifiers referring to each other.
+		// If this cycle contains a variable, then this variable refers to itself.
+		// Conversely, if there exists an initialization cycle involving
+		// a variable in the program, the tree walk will reach a cycle
+		// involving that variable.
+		if(n->class != PFUNC) {
+			nv = n;
+			goto foundinitloop;
+		}
+		for(l=initlist; l->n!=n; l=l->next) {
+			if(l->n->class != PFUNC) {
+				nv = l->n;
+				goto foundinitloop;
+			}
+		}
+		// The loop involves only functions, ok.
+		return;
+
+	foundinitloop:
 		// if there have already been errors printed,
 		// those errors probably confused us and
 		// there might not be a loop.  let the user
@@ -71,17 +95,26 @@ init1(Node *n, NodeList **out)
 		if(nerrors > 0)
 			errorexit();
 
-		print("%L: initialization loop:\n", n->lineno);
-		for(l=initlist;; l=l->next) {
-			if(l->next == nil)
-				break;
-			l->next->end = l;
-		}
+		// There is a loop involving nv. We know about
+		// n and initlist = n1 <- ... <- nv <- ... <- n <- ...
+		print("%L: initialization loop:\n", nv->lineno);
+		// Build back pointers in initlist.
+		for(l=initlist; l; l=l->next)
+			if(l->next != nil)
+				l->next->end = l;
+		// Print nv -> ... -> n1 -> n.
+		for(l=initlist; l->n!=nv; l=l->next);
 		for(; l; l=l->end)
 			print("\t%L %S refers to\n", l->n->lineno, l->n->sym);
-		print("\t%L %S\n", n->lineno, n->sym);
+		// Print n -> ... -> nv.
+		for(l=initlist; l->n!=n; l=l->next);
+		for(; l->n != nv; l=l->end)
+			print("\t%L %S refers to\n", l->n->lineno, l->n->sym);
+		print("\t%L %S\n", nv->lineno, nv->sym);
 		errorexit();
 	}
+
+	// reached a new unvisited node.
 	n->initorder = InitPending;
 	l = malloc(sizeof *l);
 	if(l == nil) {
@@ -115,31 +148,16 @@ init1(Node *n, NodeList **out)
 				break;
 			}
 
-		/*
-			n->defn->dodata = 1;
-			init1(n->defn->right, out);
+			init2(n->defn->right, out);
 			if(debug['j'])
 				print("%S\n", n->sym);
-			*out = list(*out, n->defn);
-			break;
-		*/
-			if(1) {
-				init2(n->defn->right, out);
-				if(debug['j'])
-					print("%S\n", n->sym);
-				if(!staticinit(n, out)) {
-if(debug['%']) dump("nonstatic", n->defn);
-					*out = list(*out, n->defn);
-				}
-			} else if(0) {
-				n->defn->dodata = 1;
-				init1(n->defn->right, out);
-				if(debug['j'])
-					print("%S\n", n->sym);
+			if(isblank(n) || !staticinit(n, out)) {
+				if(debug['%'])
+					dump("nonstatic", n->defn);
 				*out = list(*out, n->defn);
 			}
 			break;
-		
+
 		case OAS2FUNC:
 		case OAS2MAPR:
 		case OAS2DOTTYPE:
@@ -149,6 +167,7 @@ if(debug['%']) dump("nonstatic", n->defn);
 			n->defn->initorder = InitDone;
 			for(l=n->defn->rlist; l; l=l->next)
 				init1(l->n, out);
+			if(debug['%']) dump("nonstatic", n->defn);
 			*out = list(*out, n->defn);
 			break;
 		}
@@ -218,6 +237,9 @@ initreorder(NodeList *l, NodeList **out)
 	}
 }
 
+// initfix computes initialization order for a list l of top-level
+// declarations and outputs the corresponding list of statements
+// to include in the init() function body.
 NodeList*
 initfix(NodeList *l)
 {
@@ -264,8 +286,8 @@ staticcopy(Node *l, Node *r, NodeList **out)
 
 	if(r->op != ONAME || r->class != PEXTERN || r->sym->pkg != localpkg)
 		return 0;
-	if(r->defn == N)	// zeroed
-		return 1;
+	if(r->defn == N)	// probably zeroed but perhaps supplied externally and of unknown value
+		return 0;
 	if(r->defn->op != OAS)
 		return 0;
 	orig = r;
@@ -332,11 +354,13 @@ staticcopy(Node *l, Node *r, NodeList **out)
 			else {
 				ll = nod(OXXX, N, N);
 				*ll = n1;
+				ll->orig = ll; // completely separate copy
 				if(!staticassign(ll, e->expr, out)) {
 					// Requires computation, but we're
 					// copying someone else's computation.
 					rr = nod(OXXX, N, N);
 					*rr = *orig;
+					rr->orig = rr; // completely separate copy
 					rr->type = ll->type;
 					rr->xoffset += e->xoffset;
 					*out = list(*out, nod(OAS, ll, rr));
@@ -356,6 +380,7 @@ staticassign(Node *l, Node *r, NodeList **out)
 	InitPlan *p;
 	InitEntry *e;
 	int i;
+	Strlit *sval;
 	
 	switch(r->op) {
 	default:
@@ -404,6 +429,14 @@ staticassign(Node *l, Node *r, NodeList **out)
 		}
 		break;
 
+	case OSTRARRAYBYTE:
+		if(l->class == PEXTERN && r->left->op == OLITERAL) {
+			sval = r->left->val.u.sval;
+			slicebytes(l, sval->s, sval->len);
+			return 1;
+		}
+		break;
+
 	case OARRAYLIT:
 		initplan(r);
 		if(isslice(r->type)) {
@@ -437,6 +470,7 @@ staticassign(Node *l, Node *r, NodeList **out)
 			else {
 				a = nod(OXXX, N, N);
 				*a = n1;
+				a->orig = a; // completely separate copy
 				if(!staticassign(a, e->expr, out))
 					*out = list(*out, nod(OAS, a, e->expr));
 			}
@@ -684,6 +718,7 @@ slicelit(int ctxt, Node *n, Node *var, NodeList **init)
 	t->bound = mpgetfix(n->right->val.u.xval);
 	t->width = 0;
 	t->sym = nil;
+	t->haspointers = 0;
 	dowidth(t);
 
 	if(ctxt != 0) {
@@ -733,11 +768,24 @@ slicelit(int ctxt, Node *n, Node *var, NodeList **init)
 	vauto = temp(ptrto(t));
 
 	// set auto to point at new temp or heap (3 assign)
-	if(n->esc == EscNone) {
-		a = nod(OAS, temp(t), N);
-		typecheck(&a, Etop);
-		*init = list(*init, a);  // zero new temp
-		a = nod(OADDR, a->left, N);
+	if(n->alloc != N) {
+		// temp allocated during order.c for dddarg
+		n->alloc->type = t;
+		if(vstat == N) {
+			a = nod(OAS, n->alloc, N);
+			typecheck(&a, Etop);
+			*init = list(*init, a);  // zero new temp
+		}
+		a = nod(OADDR, n->alloc, N);
+	} else if(n->esc == EscNone) {
+		a = temp(t);
+		if(vstat == N) {
+			a = nod(OAS, temp(t), N);
+			typecheck(&a, Etop);
+			*init = list(*init, a);  // zero new temp
+			a = a->left;
+		}
+		a = nod(OADDR, a, N);
 	} else {
 		a = nod(ONEW, N, N);
 		a->list = list1(typenod(t));
@@ -804,7 +852,7 @@ maplit(int ctxt, Node *n, Node *var, NodeList **init)
 	int nerr;
 	int64 b;
 	Type *t, *tk, *tv, *t1;
-	Node *vstat, *index, *value;
+	Node *vstat, *index, *value, *key, *val;
 	Sym *syma, *symb;
 
 USED(ctxt);
@@ -823,7 +871,7 @@ ctxt = 0;
 		r = l->n;
 
 		if(r->op != OKEY)
-			fatal("slicelit: rhs not OKEY: %N", r);
+			fatal("maplit: rhs not OKEY: %N", r);
 		index = r->left;
 		value = r->right;
 
@@ -867,7 +915,7 @@ ctxt = 0;
 			r = l->n;
 
 			if(r->op != OKEY)
-				fatal("slicelit: rhs not OKEY: %N", r);
+				fatal("maplit: rhs not OKEY: %N", r);
 			index = r->left;
 			value = r->right;
 
@@ -918,8 +966,7 @@ ctxt = 0;
 
 		a->ninit = list1(nod(OAS, index, nodintconst(0)));
 		a->ntest = nod(OLT, index, nodintconst(t->bound));
-		a->nincr = nod(OASOP, index, nodintconst(1));
-		a->nincr->etype = OADD;
+		a->nincr = nod(OAS, index, nod(OADD, index, nodintconst(1)));
 
 		typecheck(&a, Etop);
 		walkstmt(&a);
@@ -927,25 +974,49 @@ ctxt = 0;
 	}
 
 	// put in dynamic entries one-at-a-time
+	key = nil;
+	val = nil;
 	for(l=n->list; l; l=l->next) {
 		r = l->n;
 
 		if(r->op != OKEY)
-			fatal("slicelit: rhs not OKEY: %N", r);
+			fatal("maplit: rhs not OKEY: %N", r);
 		index = r->left;
 		value = r->right;
 
 		if(isliteral(index) && isliteral(value))
 			continue;
-
-		// build list of var[c] = expr
-		a = nod(OINDEX, var, r->left);
-		a = nod(OAS, a, r->right);
+			
+		// build list of var[c] = expr.
+		// use temporary so that mapassign1 can have addressable key, val.
+		if(key == nil) {
+			key = temp(var->type->down);
+			val = temp(var->type->type);
+		}
+		a = nod(OAS, key, r->left);
 		typecheck(&a, Etop);
-		walkexpr(&a, init);
+		walkstmt(&a);
+		*init = list(*init, a);
+		a = nod(OAS, val, r->right);
+		typecheck(&a, Etop);
+		walkstmt(&a);
+		*init = list(*init, a);
+
+		a = nod(OAS, nod(OINDEX, var, key), val);
+		typecheck(&a, Etop);
+		walkstmt(&a);
+		*init = list(*init, a);
+
 		if(nerr != nerrors)
 			break;
-
+	}
+	
+	if(key != nil) {
+		a = nod(OVARKILL, key, N);
+		typecheck(&a, Etop);
+		*init = list(*init, a);
+		a = nod(OVARKILL, val, N);
+		typecheck(&a, Etop);
 		*init = list(*init, a);
 	}
 }
@@ -965,12 +1036,16 @@ anylit(int ctxt, Node *n, Node *var, NodeList **init)
 		if(!isptr[t->etype])
 			fatal("anylit: not ptr");
 
-		r = nod(ONEW, N, N);
-		r->typecheck = 1;
-		r->type = t;
-		r->esc = n->esc;
+		if(n->right != N) {
+			r = nod(OADDR, n->right, N);
+			typecheck(&r, Erv);
+		} else {
+			r = nod(ONEW, N, N);
+			r->typecheck = 1;
+			r->type = t;
+			r->esc = n->esc;
+		}
 		walkexpr(&r, init);
-
 		a = nod(OAS, var, r);
 
 		typecheck(&a, Etop);

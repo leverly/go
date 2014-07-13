@@ -102,7 +102,7 @@ struct MachoSect
 	uint32 flags;
 	uint32 res1;
 	uint32 res2;
-	Sym *sym;
+	LSym *sym;
 	
 	MachoRel *rel;
 };
@@ -138,7 +138,7 @@ struct MachoSym
 	uint16 desc;
 	char kind;
 	uint64 value;
-	Sym *sym;
+	LSym *sym;
 };
 
 struct MachoDysymtab
@@ -432,7 +432,7 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 	int64 base;
 	MachoSect *sect;
 	MachoRel *rel;
-	Sym *s, *outer;
+	LSym *s, *s1, *outer;
 	MachoCmd *c;
 	MachoSymtab *symtab;
 	MachoDysymtab *dsymtab;
@@ -440,7 +440,7 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 	Reloc *r, *rp;
 	char *name;
 
-	version++;
+	ctxt->version++;
 	base = Boffset(f);
 	if(Bread(f, hdr, sizeof hdr) != sizeof hdr)
 		goto bad;
@@ -507,6 +507,7 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 	c = nil;
 	symtab = nil;
 	dsymtab = nil;
+	USED(dsymtab);
 	for(i=0; i<ncmd; i++){
 		ty = e->e32(cmdp);
 		sz = e->e32(cmdp+4);
@@ -566,7 +567,7 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 		if(strcmp(sect->name, "__eh_frame") == 0)
 			continue;
 		name = smprint("%s(%s/%s)", pkg, sect->segname, sect->name);
-		s = lookup(name, version);
+		s = linklookup(ctxt, name, ctxt->version);
 		if(s->type != 0) {
 			werrstr("duplicate %s/%s", sect->segname, sect->name);
 			goto bad;
@@ -609,8 +610,10 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 			name++;
 		v = 0;
 		if(!(sym->type&N_EXT))
-			v = version;
-		s = lookup(name, v);
+			v = ctxt->version;
+		s = linklookup(ctxt, name, v);
+		if(!(sym->type&N_EXT))
+			s->dupok = 1;
 		sym->sym = s;
 		if(sym->sectnum == 0)	// undefined
 			continue;
@@ -635,29 +638,12 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 		outer->sub = s;
 		s->outer = outer;
 		s->value = sym->value - sect->addr;
-		if(i+1 < symtab->nsym)
-			s->size = (sym+1)->value - sym->value;
-		else
-			s->size = sect->addr + sect->size - sym->value;
 		if(!(s->cgoexport & CgoExportDynamic))
 			s->dynimplib = nil;	// satisfy dynimport
 		if(outer->type == STEXT) {
-			Prog *p;
-
-			if(s->text != P)
-				diag("%s sym#%d: duplicate definition of %s", pn, i, s->name);
-			// build a TEXT instruction with a unique pc
-			// just to make the rest of the linker happy.
-			// TODO: this is too 6l-specific ?
-			p = prg();
-			p->as = ATEXT;
-			p->from.type = D_EXTERN;
-			p->from.sym = s;
-			p->textflag = 7;
-			p->to.type = D_CONST;
-			p->link = nil;
-			p->pc = pc++;
-			s->text = p;
+			if(s->external && !s->dupok)
+				diag("%s: duplicate definition of %s", pn, s->name);
+			s->external = 1;
 		}
 		sym->sym = s;
 	}
@@ -668,17 +654,32 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 		sect = &c->seg.sect[i];
 		if((s = sect->sym) == S)
 			continue;
-		if(s->sub)
-			s->sub = listsort(s->sub, valuecmp, offsetof(Sym, sub));
+		if(s->sub) {
+			s->sub = listsort(s->sub, valuecmp, offsetof(LSym, sub));
+			
+			// assign sizes, now that we know symbols in sorted order.
+			for(s1 = s->sub; s1 != S; s1 = s1->sub) {
+				if(s1->sub)
+					s1->size = s1->sub->value - s1->value;
+				else
+					s1->size = s->value + s->size - s1->value;
+			}
+		}
 		if(s->type == STEXT) {
-			if(etextp)
-				etextp->next = s;
+			if(s->onlist)
+				sysfatal("symbol %s listed multiple times", s->name);
+			s->onlist = 1;
+			if(ctxt->etextp)
+				ctxt->etextp->next = s;
 			else
-				textp = s;
-			etextp = s;
-			for(s = s->sub; s != S; s = s->sub) {
-				etextp->next = s;
-				etextp = s;
+				ctxt->textp = s;
+			ctxt->etextp = s;
+			for(s1 = s->sub; s1 != S; s1 = s1->sub) {
+				if(s1->onlist)
+					sysfatal("symbol %s listed multiple times", s1->name);
+				s1->onlist = 1;
+				ctxt->etextp->next = s1;
+				ctxt->etextp = s1;
 			}
 		}
 	}
@@ -736,7 +737,7 @@ ldmacho(Biobuf *f, char *pkg, int64 len, char *pn)
 				// want to make it pc-relative aka relative to rp->off+4
 				// but the scatter asks for relative to off = (rel+1)->value - sect->addr.
 				// adjust rp->add accordingly.
-				rp->type = D_PCREL;
+				rp->type = R_PCREL;
 				rp->add += (rp->off+4) - ((rel+1)->value - sect->addr);
 				
 				// now consider the desired symbol.

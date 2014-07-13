@@ -124,7 +124,7 @@ func (d *decoder) ignore(n int) error {
 }
 
 // Specified in section B.2.2.
-func (d *decoder) processSOF(n int, configOnly bool) error {
+func (d *decoder) processSOF(n int) error {
 	switch n {
 	case 6 + 3*nGrayComponent:
 		d.nComp = nGrayComponent
@@ -145,9 +145,6 @@ func (d *decoder) processSOF(n int, configOnly bool) error {
 	d.width = int(d.tmp[3])<<8 + int(d.tmp[4])
 	if int(d.tmp[5]) != d.nComp {
 		return UnsupportedError("SOF has wrong number of image components")
-	}
-	if configOnly {
-		return nil
 	}
 	for i := 0; i < d.nComp; i++ {
 		d.comp[i].c = d.tmp[6+3*i]
@@ -177,10 +174,10 @@ func (d *decoder) processSOF(n int, configOnly bool) error {
 		// values for the Cr and Cb components must be (1, 1).
 		if i == 0 {
 			if hv != 0x11 && hv != 0x21 && hv != 0x22 && hv != 0x12 {
-				return UnsupportedError("luma downsample ratio")
+				return UnsupportedError("luma/chroma downsample ratio")
 			}
 		} else if hv != 0x11 {
-			return UnsupportedError("chroma downsample ratio")
+			return UnsupportedError("luma/chroma downsample ratio")
 		}
 	}
 	return nil
@@ -315,7 +312,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		switch {
 		case marker == sof0Marker || marker == sof2Marker: // Start Of Frame.
 			d.progressive = marker == sof2Marker
-			err = d.processSOF(n, configOnly)
+			err = d.processSOF(n)
 			if configOnly {
 				return nil, err
 			}

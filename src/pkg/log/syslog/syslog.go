@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build !windows,!plan9
+// +build !windows,!nacl,!plan9
 
 // Package syslog provides a simple interface to the system log
 // service. It can send messages to the syslog daemon using UNIX
@@ -88,7 +88,23 @@ type Writer struct {
 	raddr    string
 
 	mu   sync.Mutex // guards conn
-	conn net.Conn
+	conn serverConn
+}
+
+// This interface and the separate syslog_unix.go file exist for
+// Solaris support as implemented by gccgo.  On Solaris you can not
+// simply open a TCP connection to the syslog daemon.  The gccgo
+// sources have a syslog_solaris.go file that implements unixSyslog to
+// return a type that satisfies this interface and simply calls the C
+// library syslog function.
+type serverConn interface {
+	writeString(p Priority, hostname, tag, s, nl string) error
+	close() error
+}
+
+type netConn struct {
+	local bool
+	conn  net.Conn
 }
 
 // New establishes a new connection to the system log daemon.  Each
@@ -99,9 +115,10 @@ func New(priority Priority, tag string) (w *Writer, err error) {
 }
 
 // Dial establishes a connection to a log daemon by connecting to
-// address raddr on the network net.  Each write to the returned
+// address raddr on the specified network.  Each write to the returned
 // writer sends a log message with the given facility, severity and
 // tag.
+// If network is empty, Dial will connect to the local syslog server.
 func Dial(network, raddr string, priority Priority, tag string) (*Writer, error) {
 	if priority < 0 || priority > LOG_LOCAL7|LOG_DEBUG {
 		return nil, errors.New("log/syslog: invalid priority")
@@ -135,7 +152,7 @@ func Dial(network, raddr string, priority Priority, tag string) (*Writer, error)
 func (w *Writer) connect() (err error) {
 	if w.conn != nil {
 		// ignore err from close, it makes sense to continue anyway
-		w.conn.Close()
+		w.conn.close()
 		w.conn = nil
 	}
 
@@ -148,7 +165,7 @@ func (w *Writer) connect() (err error) {
 		var c net.Conn
 		c, err = net.Dial(w.network, w.raddr)
 		if err == nil {
-			w.conn = c
+			w.conn = &netConn{conn: c}
 			if w.hostname == "" {
 				w.hostname = c.LocalAddr().String()
 			}
@@ -168,7 +185,7 @@ func (w *Writer) Close() error {
 	defer w.mu.Unlock()
 
 	if w.conn != nil {
-		err := w.conn.Close()
+		err := w.conn.close()
 		w.conn = nil
 		return err
 	}
@@ -203,7 +220,7 @@ func (w *Writer) Err(m string) (err error) {
 	return err
 }
 
-// Wanring logs a message with severity LOG_WARNING, ignoring the
+// Warning logs a message with severity LOG_WARNING, ignoring the
 // severity passed to New.
 func (w *Writer) Warning(m string) (err error) {
 	_, err = w.writeAndRetry(LOG_WARNING, m)
@@ -257,11 +274,36 @@ func (w *Writer) write(p Priority, msg string) (int, error) {
 		nl = "\n"
 	}
 
-	timestamp := time.Now().Format(time.RFC3339)
-	fmt.Fprintf(w.conn, "<%d>%s %s %s[%d]: %s%s",
-		p, timestamp, w.hostname,
-		w.tag, os.Getpid(), msg, nl)
+	err := w.conn.writeString(p, w.hostname, w.tag, msg, nl)
+	if err != nil {
+		return 0, err
+	}
+	// Note: return the length of the input, not the number of
+	// bytes printed by Fprintf, because this must behave like
+	// an io.Writer.
 	return len(msg), nil
+}
+
+func (n *netConn) writeString(p Priority, hostname, tag, msg, nl string) error {
+	if n.local {
+		// Compared to the network form below, the changes are:
+		//	1. Use time.Stamp instead of time.RFC3339.
+		//	2. Drop the hostname field from the Fprintf.
+		timestamp := time.Now().Format(time.Stamp)
+		_, err := fmt.Fprintf(n.conn, "<%d>%s %s[%d]: %s%s",
+			p, timestamp,
+			tag, os.Getpid(), msg, nl)
+		return err
+	}
+	timestamp := time.Now().Format(time.RFC3339)
+	_, err := fmt.Fprintf(n.conn, "<%d>%s %s %s[%d]: %s%s",
+		p, timestamp, hostname,
+		tag, os.Getpid(), msg, nl)
+	return err
+}
+
+func (n *netConn) close() error {
+	return n.conn.Close()
 }
 
 // NewLogger creates a log.Logger whose output is written to

@@ -6,5 +6,7 @@ enum {
 	thechar = '5',
 	BigEndian = 0,
 	CacheLineSize = 32,
-	appendCrossover = 8
+	RuntimeGogoBytes = 80,
+	PhysPageSize = 4096,
+	PCQuantum = 4
 };

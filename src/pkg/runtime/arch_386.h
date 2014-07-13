@@ -6,5 +6,11 @@ enum {
 	thechar = '8',
 	BigEndian = 0,
 	CacheLineSize = 64,
-	appendCrossover = 16
+	RuntimeGogoBytes = 64,
+#ifdef GOOS_nacl
+	PhysPageSize = 65536,
+#else
+	PhysPageSize = 4096,
+#endif
+	PCQuantum = 1
 };

@@ -31,13 +31,22 @@
 
 #include "gc.h"
 
+
+int thechar = '5';
+char *thestring = "arm";
+
+LinkArch	*thelinkarch = &linkarm;
+
+void
+linkarchinit(void)
+{
+}
+
 void
 ginit(void)
 {
 	Type *t;
 
-	thechar = '5';
-	thestring = "arm";
 	exregoffset = REGEXT;
 	exfregoffset = FREGEXT;
 	listinit();
@@ -48,7 +57,6 @@ ginit(void)
 	breakpc = -1;
 	continpc = -1;
 	cases = C;
-	firstp = P;
 	lastp = P;
 	tfield = types[TLONG];
 
@@ -139,9 +147,7 @@ gclean(void)
 			continue;
 		if(s->type == types[TENUM])
 			continue;
-		textflag = s->dataflag;
 		gpseudo(AGLOBL, s, nodconst(s->type->width));
-		textflag = 0;
 	}
 	nextpc();
 	p->as = AEND;
@@ -151,17 +157,17 @@ gclean(void)
 void
 nextpc(void)
 {
+	Plist *pl;
 
 	p = alloc(sizeof(*p));
 	*p = zprog;
 	p->lineno = nearln;
 	pc++;
-	if(firstp == P) {
-		firstp = p;
-		lastp = p;
-		return;
-	}
-	lastp->link = p;
+	if(lastp == nil) {
+		pl = linknewplist(ctxt);
+		pl->firstpc = p;
+	} else
+		lastp->link = p;
 	lastp = p;
 }
 
@@ -424,7 +430,7 @@ regind(Node *n, Node *nn)
 void
 raddr(Node *n, Prog *p)
 {
-	Adr a;
+	Addr a;
 
 	naddr(n, &a);
 	if(R0ISZERO && a.type == D_CONST && a.offset == 0) {
@@ -442,7 +448,7 @@ raddr(Node *n, Prog *p)
 }
 
 void
-naddr(Node *n, Adr *a)
+naddr(Node *n, Addr *a)
 {
 	int32 v;
 
@@ -457,7 +463,7 @@ naddr(Node *n, Adr *a)
 
 	case OREGISTER:
 		a->type = D_REG;
-		a->sym = S;
+		a->sym = nil;
 		a->reg = n->reg;
 		if(a->reg >= NREG) {
 			a->type = D_FREG;
@@ -479,7 +485,7 @@ naddr(Node *n, Adr *a)
 
 	case OINDREG:
 		a->type = D_OREG;
-		a->sym = S;
+		a->sym = nil;
 		a->offset = n->xoffset;
 		a->reg = n->reg;
 		break;
@@ -488,7 +494,7 @@ naddr(Node *n, Adr *a)
 		a->etype = n->etype;
 		a->type = D_OREG;
 		a->name = D_STATIC;
-		a->sym = n->sym;
+		a->sym = linksym(n->sym);
 		a->offset = n->xoffset;
 		if(n->class == CSTATIC)
 			break;
@@ -507,11 +513,11 @@ naddr(Node *n, Adr *a)
 		goto bad;
 
 	case OCONST:
-		a->sym = S;
+		a->sym = nil;
 		a->reg = NREG;
 		if(typefd[n->type->etype]) {
 			a->type = D_FCONST;
-			a->dval = n->fconst;
+			a->u.dval = n->fconst;
 		} else {
 			a->type = D_CONST;
 			a->offset = n->vconst;
@@ -596,13 +602,13 @@ gmove(Node *f, Node *t)
 			a = AMOVD;
 			break;
 		case TCHAR:
-			a = AMOVB;
+			a = AMOVBS;
 			break;
 		case TUCHAR:
 			a = AMOVBU;
 			break;
 		case TSHORT:
-			a = AMOVH;
+			a = AMOVHS;
 			break;
 		case TUSHORT:
 			a = AMOVHU;
@@ -632,13 +638,13 @@ gmove(Node *f, Node *t)
 			a = AMOVBU;
 			break;
 		case TCHAR:
-			a = AMOVB;
+			a = AMOVBS;
 			break;
 		case TUSHORT:
 			a = AMOVHU;
 			break;
 		case TSHORT:
-			a = AMOVH;
+			a = AMOVHS;
 			break;
 		case TFLOAT:
 			a = AMOVF;
@@ -763,13 +769,13 @@ gmove(Node *f, Node *t)
 		switch(tt) {
 		case TDOUBLE:
 			regalloc(&nod, f, Z);
-			gins(AMOVH, f, &nod);
+			gins(AMOVHS, f, &nod);
 			gins(AMOVWD, &nod, t);
 			regfree(&nod);
 			return;
 		case TFLOAT:
 			regalloc(&nod, f, Z);
-			gins(AMOVH, f, &nod);
+			gins(AMOVHS, f, &nod);
 			gins(AMOVWF, &nod, t);
 			regfree(&nod);
 			return;
@@ -778,7 +784,7 @@ gmove(Node *f, Node *t)
 		case TULONG:
 		case TLONG:
 		case TIND:
-			a = AMOVH;
+			a = AMOVHS;
 			break;
 		case TSHORT:
 		case TUSHORT:
@@ -821,13 +827,13 @@ gmove(Node *f, Node *t)
 		switch(tt) {
 		case TDOUBLE:
 			regalloc(&nod, f, Z);
-			gins(AMOVB, f, &nod);
+			gins(AMOVBS, f, &nod);
 			gins(AMOVWD, &nod, t);
 			regfree(&nod);
 			return;
 		case TFLOAT:
 			regalloc(&nod, f, Z);
-			gins(AMOVB, f, &nod);
+			gins(AMOVBS, f, &nod);
 			gins(AMOVWF, &nod, t);
 			regfree(&nod);
 			return;
@@ -838,7 +844,7 @@ gmove(Node *f, Node *t)
 		case TIND:
 		case TSHORT:
 		case TUSHORT:
-			a = AMOVB;
+			a = AMOVBS;
 			break;
 		case TCHAR:
 		case TUCHAR:
@@ -895,13 +901,13 @@ gmover(Node *f, Node *t)
 	if(typechlp[ft] && typechlp[tt] && ewidth[ft] >= ewidth[tt]){
 		switch(tt){
 		case TSHORT:
-			a = AMOVH;
+			a = AMOVHS;
 			break;
 		case TUSHORT:
 			a = AMOVHU;
 			break;
 		case TCHAR:
-			a = AMOVB;
+			a = AMOVBS;
 			break;
 		case TUCHAR:
 			a = AMOVBU;
@@ -932,7 +938,7 @@ void
 gopcode(int o, Node *f1, Node *f2, Node *t)
 {
 	int a, et;
-	Adr ta;
+	Addr ta;
 
 	et = TLONG;
 	if(f1 != Z && f1->type != T)
@@ -1179,17 +1185,33 @@ gpseudo(int a, Sym *s, Node *n)
 	nextpc();
 	p->as = a;
 	p->from.type = D_OREG;
-	p->from.sym = s;
+	p->from.sym = linksym(s);
 	p->from.name = D_EXTERN;
-	if(a == ATEXT || a == AGLOBL) {
+
+	switch(a) {
+	case ATEXT:
 		p->reg = textflag;
 		textflag = 0;
+		break;
+	case AGLOBL:
+		p->reg = s->dataflag;
+		break;
 	}
+
 	if(s->class == CSTATIC)
 		p->from.name = D_STATIC;
 	naddr(n, &p->to);
 	if(a == ADATA || a == AGLOBL)
 		pc--;
+}
+
+void
+gpcdata(int index, int value)
+{
+	Node n1;
+	
+	n1 = *nodconst(index);
+	gins(APCDATA, &n1, nodconst(value));
 }
 
 void

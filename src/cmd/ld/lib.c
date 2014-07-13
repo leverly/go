@@ -32,18 +32,29 @@
 #include	"l.h"
 #include	"lib.h"
 #include	"../ld/elf.h"
+#include	"../ld/dwarf.h"
 #include	"../../pkg/runtime/stack.h"
+#include	"../../pkg/runtime/funcdata.h"
 
 #include	<ar.h>
+#if !(defined(_WIN32) || defined(PLAN9))
+#include	<sys/stat.h>
+#endif
+
+enum
+{
+	// Whether to assume that the external linker is "gold"
+	// (http://sourceware.org/ml/binutils/2008-03/msg00162.html).
+	AssumeGoldLinker = 0,
+};
 
 int iconv(Fmt*);
 
 char	symname[]	= SYMDEF;
 char	pkgname[]	= "__.PKGDEF";
-char**	libdir;
-int	nlibdir = 0;
-static int	maxlibdir = 0;
 static int	cout = -1;
+
+extern int	version;
 
 // Set if we see an object compiled by the host compiler that is not
 // from a package that is known to support internal linking mode.
@@ -61,41 +72,58 @@ Lflag(char *arg)
 {
 	char **p;
 
-	if(nlibdir >= maxlibdir) {
-		if (maxlibdir == 0)
-			maxlibdir = 8;
+	if(ctxt->nlibdir >= ctxt->maxlibdir) {
+		if (ctxt->maxlibdir == 0)
+			ctxt->maxlibdir = 8;
 		else
-			maxlibdir *= 2;
-		p = erealloc(libdir, maxlibdir * sizeof(*p));
-		libdir = p;
+			ctxt->maxlibdir *= 2;
+		p = erealloc(ctxt->libdir, ctxt->maxlibdir * sizeof(*p));
+		ctxt->libdir = p;
 	}
-	libdir[nlibdir++] = arg;
+	ctxt->libdir[ctxt->nlibdir++] = arg;
+}
+
+/*
+ * Unix doesn't like it when we write to a running (or, sometimes,
+ * recently run) binary, so remove the output file before writing it.
+ * On Windows 7, remove() can force a subsequent create() to fail.
+ * S_ISREG() does not exist on Plan 9.
+ */
+static void
+mayberemoveoutfile(void) 
+{
+#if !(defined(_WIN32) || defined(PLAN9))
+	struct stat st;
+	if(lstat(outfile, &st) == 0 && !S_ISREG(st.st_mode))
+		return;
+#endif
+	remove(outfile);
 }
 
 void
 libinit(void)
 {
-	char *race;
+	char *suffix, *suffixsep;
 
+	funcalign = FuncAlign;
 	fmtinstall('i', iconv);
 	fmtinstall('Y', Yconv);
 	fmtinstall('Z', Zconv);
 	mywhatsys();	// get goroot, goarch, goos
-	if(strcmp(goarch, thestring) != 0)
-		print("goarch is not known: %s\n", goarch);
 
 	// add goroot to the end of the libdir list.
-	race = "";
-	if(flag_race)
-		race = "_race";
-	Lflag(smprint("%s/pkg/%s_%s%s", goroot, goos, goarch, race));
+	suffix = "";
+	suffixsep = "";
+	if(flag_installsuffix != nil) {
+		suffixsep = "_";
+		suffix = flag_installsuffix;
+	} else if(flag_race) {
+		suffixsep = "_";
+		suffix = "race";
+	}
+	Lflag(smprint("%s/pkg/%s_%s%s%s", goroot, goos, goarch, suffixsep, suffix));
 
-	// Unix doesn't like it when we write to a running (or, sometimes,
-	// recently run) binary, so remove the output file before writing it.
-	// On Windows 7, remove() can force the following create() to fail.
-#ifndef _WIN32
-	remove(outfile);
-#endif
+	mayberemoveoutfile();
 	cout = create(outfile, 1, 0775);
 	if(cout < 0) {
 		diag("cannot create %s: %r", outfile);
@@ -103,17 +131,14 @@ libinit(void)
 	}
 
 	if(INITENTRY == nil) {
-		INITENTRY = mal(strlen(goarch)+strlen(goos)+10);
-		sprint(INITENTRY, "_rt0_%s_%s", goarch, goos);
-	}
-	lookup(INITENTRY, 0)->type = SXREF;
-	if(flag_shared) {
-		if(LIBINITENTRY == nil) {
-			LIBINITENTRY = mal(strlen(goarch)+strlen(goos)+20);
-			sprint(LIBINITENTRY, "_rt0_%s_%s_lib", goarch, goos);
+		INITENTRY = mal(strlen(goarch)+strlen(goos)+20);
+		if(!flag_shared) {
+			sprint(INITENTRY, "_rt0_%s_%s", goarch, goos);
+		} else {
+			sprint(INITENTRY, "_rt0_%s_%s_lib", goarch, goos);
 		}
-		lookup(LIBINITENTRY, 0)->type = SXREF;
 	}
+	linklookup(ctxt, INITENTRY, 0)->type = SXREF;
 }
 
 void
@@ -121,150 +146,10 @@ errorexit(void)
 {
 	if(nerrors) {
 		if(cout >= 0)
-			remove(outfile);
+			mayberemoveoutfile();
 		exits("error");
 	}
 	exits(0);
-}
-
-void
-addlib(char *src, char *obj)
-{
-	char name[1024], pname[1024], comp[256], *p;
-	int i, search;
-
-	if(histfrogp <= 0)
-		return;
-
-	search = 0;
-	if(histfrog[0]->name[1] == '/') {
-		sprint(name, "");
-		i = 1;
-	} else
-	if(isalpha((uchar)histfrog[0]->name[1]) && histfrog[0]->name[2] == ':') {
-		strcpy(name, histfrog[0]->name+1);
-		i = 1;
-	} else
-	if(histfrog[0]->name[1] == '.') {
-		sprint(name, ".");
-		i = 0;
-	} else {
-		sprint(name, "");
-		i = 0;
-		search = 1;
-	}
-
-	for(; i<histfrogp; i++) {
-		snprint(comp, sizeof comp, "%s", histfrog[i]->name+1);
-		for(;;) {
-			p = strstr(comp, "$O");
-			if(p == 0)
-				break;
-			memmove(p+1, p+2, strlen(p+2)+1);
-			p[0] = thechar;
-		}
-		for(;;) {
-			p = strstr(comp, "$M");
-			if(p == 0)
-				break;
-			if(strlen(comp)+strlen(thestring)-2+1 >= sizeof comp) {
-				diag("library component too long");
-				return;
-			}
-			memmove(p+strlen(thestring), p+2, strlen(p+2)+1);
-			memmove(p, thestring, strlen(thestring));
-		}
-		if(strlen(name) + strlen(comp) + 3 >= sizeof(name)) {
-			diag("library component too long");
-			return;
-		}
-		if(i > 0 || !search)
-			strcat(name, "/");
-		strcat(name, comp);
-	}
-	cleanname(name);
-	
-	// runtime.a -> runtime
-	p = nil;
-	if(strlen(name) > 2 && name[strlen(name)-2] == '.') {
-		p = name+strlen(name)-2;
-		*p = '\0';
-	}
-	
-	// already loaded?
-	for(i=0; i<libraryp; i++)
-		if(strcmp(library[i].pkg, name) == 0)
-			return;
-	
-	// runtime -> runtime.a for search
-	if(p != nil)
-		*p = '.';
-
-	if(search) {
-		// try dot, -L "libdir", and then goroot.
-		for(i=0; i<nlibdir; i++) {
-			snprint(pname, sizeof pname, "%s/%s", libdir[i], name);
-			if(access(pname, AEXIST) >= 0)
-				break;
-		}
-	}else
-		strcpy(pname, name);
-	cleanname(pname);
-
-	/* runtime.a -> runtime */
-	if(p != nil)
-		*p = '\0';
-
-	if(debug['v'])
-		Bprint(&bso, "%5.2f addlib: %s %s pulls in %s\n", cputime(), obj, src, pname);
-
-	addlibpath(src, obj, pname, name);
-}
-
-/*
- * add library to library list.
- *	srcref: src file referring to package
- *	objref: object file referring to package
- *	file: object file, e.g., /home/rsc/go/pkg/container/vector.a
- *	pkg: package import path, e.g. container/vector
- */
-void
-addlibpath(char *srcref, char *objref, char *file, char *pkg)
-{
-	int i;
-	Library *l;
-	char *p;
-
-	for(i=0; i<libraryp; i++)
-		if(strcmp(file, library[i].file) == 0)
-			return;
-
-	if(debug['v'] > 1)
-		Bprint(&bso, "%5.2f addlibpath: srcref: %s objref: %s file: %s pkg: %s\n",
-			cputime(), srcref, objref, file, pkg);
-
-	if(libraryp == nlibrary){
-		nlibrary = 50 + 2*libraryp;
-		library = erealloc(library, sizeof library[0] * nlibrary);
-	}
-
-	l = &library[libraryp++];
-
-	p = mal(strlen(objref) + 1);
-	strcpy(p, objref);
-	l->objref = p;
-
-	p = mal(strlen(srcref) + 1);
-	strcpy(p, srcref);
-	l->srcref = p;
-
-	p = mal(strlen(file) + 1);
-	strcpy(p, file);
-	l->file = p;
-
-	p = mal(strlen(pkg) + 1);
-	strcpy(p, pkg);
-	l->pkg = p;
 }
 
 void
@@ -274,12 +159,12 @@ loadinternal(char *name)
 	int i, found;
 
 	found = 0;
-	for(i=0; i<nlibdir; i++) {
-		snprint(pname, sizeof pname, "%s/%s.a", libdir[i], name);
+	for(i=0; i<ctxt->nlibdir; i++) {
+		snprint(pname, sizeof pname, "%s/%s.a", ctxt->libdir[i], name);
 		if(debug['v'])
 			Bprint(&bso, "searching for %s.a in %s\n", name, pname);
 		if(access(pname, AEXIST) >= 0) {
-			addlibpath("internal", "internal", pname, name);
+			addlibpath(ctxt, "internal", "internal", pname, name);
 			found = 1;
 			break;
 		}
@@ -292,34 +177,50 @@ void
 loadlib(void)
 {
 	int i, w, x;
-	Sym *s;
+	LSym *s, *gmsym;
+	char* cgostrsym;
+
+	if(flag_shared) {
+		s = linklookup(ctxt, "runtime.islibrary", 0);
+		s->dupok = 1;
+		adduint8(ctxt, s, 1);
+	}
 
 	loadinternal("runtime");
 	if(thechar == '5')
 		loadinternal("math");
 	if(flag_race)
 		loadinternal("runtime/race");
-	if(linkmode == LinkExternal) {
+
+	for(i=0; i<ctxt->libraryp; i++) {
+		if(debug['v'] > 1)
+			Bprint(&bso, "%5.2f autolib: %s (from %s)\n", cputime(), ctxt->library[i].file, ctxt->library[i].objref);
+		iscgo |= strcmp(ctxt->library[i].pkg, "runtime/cgo") == 0;
+		objfile(ctxt->library[i].file, ctxt->library[i].pkg);
+	}
+	
+	if(linkmode == LinkExternal && !iscgo) {
 		// This indicates a user requested -linkmode=external.
 		// The startup code uses an import of runtime/cgo to decide
 		// whether to initialize the TLS.  So give it one.  This could
 		// be handled differently but it's an unusual case.
 		loadinternal("runtime/cgo");
+		if(i < ctxt->libraryp)
+			objfile(ctxt->library[i].file, ctxt->library[i].pkg);
+
 		// Pretend that we really imported the package.
-		// This will do no harm if we did in fact import it.
-		s = lookup("go.importpath.runtime/cgo.", 0);
+		s = linklookup(ctxt, "go.importpath.runtime/cgo.", 0);
 		s->type = SDATA;
 		s->dupok = 1;
 		s->reachable = 1;
+
+		// Provided by the code that imports the package.
+		// Since we are simulating the import, we have to provide this string.
+		cgostrsym = "go.string.\"runtime/cgo\"";
+		if(linkrlookup(ctxt, cgostrsym, 0) == nil)
+			addstrdata(cgostrsym, "runtime/cgo");
 	}
 
-	for(i=0; i<libraryp; i++) {
-		if(debug['v'])
-			Bprint(&bso, "%5.2f autolib: %s (from %s)\n", cputime(), library[i].file, library[i].objref);
-		iscgo |= strcmp(library[i].pkg, "runtime/cgo") == 0;
-		objfile(library[i].file, library[i].pkg);
-	}
-	
 	if(linkmode == LinkAuto) {
 		if(iscgo && externalobj)
 			linkmode = LinkExternal;
@@ -330,7 +231,7 @@ loadlib(void)
 	if(linkmode == LinkInternal) {
 		// Drop all the cgo_import_static declarations.
 		// Turns out we won't be needing them.
-		for(s = allsym; s != S; s = s->allsym)
+		for(s = ctxt->allsym; s != S; s = s->allsym)
 			if(s->type == SHOSTOBJ) {
 				// If a symbol was marked both
 				// cgo_import_static and cgo_import_dynamic,
@@ -343,6 +244,13 @@ loadlib(void)
 			}
 	}
 	
+	gmsym = linklookup(ctxt, "runtime.tlsgm", 0);
+	gmsym->type = STLSBSS;
+	gmsym->size = 2*PtrSize;
+	gmsym->hide = 1;
+	gmsym->reachable = 1;
+	ctxt->gmsym = gmsym;
+
 	// Now that we know the link mode, trim the dynexp list.
 	x = CgoExportDynamic;
 	if(linkmode == LinkExternal)
@@ -368,7 +276,9 @@ loadlib(void)
 	//
 	// Exception: on OS X, programs such as Shark only work with dynamic
 	// binaries, so leave it enabled on OS X (Mach-O) binaries.
-	if(!flag_shared && !havedynamic && HEADTYPE != Hdarwin)
+	// Also leave it enabled on Solaris which doesn't support
+	// statically linked binaries.
+	if(!flag_shared && !havedynamic && HEADTYPE != Hdarwin && HEADTYPE != Hsolaris)
 		debug['d'] = 1;
 	
 	importcycles();
@@ -378,8 +288,8 @@ loadlib(void)
  * look for the next file in an archive.
  * adapted from libmach.
  */
-int
-nextar(Biobuf *bp, int off, struct ar_hdr *a)
+static vlong
+nextar(Biobuf *bp, vlong off, struct ar_hdr *a)
 {
 	int r;
 	int32 arsize;
@@ -409,7 +319,7 @@ nextar(Biobuf *bp, int off, struct ar_hdr *a)
 void
 objfile(char *file, char *pkg)
 {
-	int32 off, l;
+	vlong off, l;
 	Biobuf *f;
 	char magbuf[SARMAG];
 	char pname[150];
@@ -417,7 +327,7 @@ objfile(char *file, char *pkg)
 
 	pkg = smprint("%i", pkg);
 
-	if(debug['v'])
+	if(debug['v'] > 1)
 		Bprint(&bso, "%5.2f ldobj: %s (%s)\n", cputime(), file, pkg);
 	Bflush(&bso);
 	f = Bopen(file, 0);
@@ -436,25 +346,24 @@ objfile(char *file, char *pkg)
 		return;
 	}
 	
-	/* skip over __.GOSYMDEF */
+	/* skip over optional __.GOSYMDEF and process __.PKGDEF */
 	off = Boffset(f);
-	if((l = nextar(f, off, &arhdr)) <= 0) {
+	l = nextar(f, off, &arhdr);
+	if(l <= 0) {
 		diag("%s: short read on archive file symbol header", file);
 		goto out;
 	}
-	if(strncmp(arhdr.name, symname, strlen(symname))) {
-		diag("%s: first entry not symbol header", file);
-		goto out;
+	if(strncmp(arhdr.name, symname, strlen(symname)) == 0) {
+		off += l;
+		l = nextar(f, off, &arhdr);
+		if(l <= 0) {
+			diag("%s: short read on archive file symbol header", file);
+			goto out;
+		}
 	}
-	off += l;
-	
-	/* skip over (or process) __.PKGDEF */
-	if((l = nextar(f, off, &arhdr)) <= 0) {
-		diag("%s: short read on archive file symbol header", file);
-		goto out;
-	}
+
 	if(strncmp(arhdr.name, pkgname, strlen(pkgname))) {
-		diag("%s: second entry not package header", file);
+		diag("%s: cannot find package header", file);
 		goto out;
 	}
 	off += l;
@@ -505,7 +414,7 @@ dowrite(int fd, char *p, int n)
 	while(n > 0) {
 		m = write(fd, p, n);
 		if(m <= 0) {
-			cursym = S;
+			ctxt->cursym = S;
 			diag("write error: %r");
 			errorexit();
 		}
@@ -554,6 +463,16 @@ ldhostobj(void (*ld)(Biobuf*, char*, int64, char*), Biobuf *f, char *pkg, int64 
 		}
 	}
 
+	// DragonFly declares errno with __thread, which results in a symbol
+	// type of R_386_TLS_GD or R_X86_64_TLSGD. The Go linker does not
+	// currently know how to handle TLS relocations, hence we have to
+	// force external linking for any libraries that link in code that
+	// uses errno. This can be removed if the Go linker ever supports
+	// these relocation types.
+	if(HEADTYPE == Hdragonfly)
+	if(strcmp(pkg, "net") == 0 || strcmp(pkg, "os/user") == 0)
+		isinternal = 0;
+
 	if(!isinternal)
 		externalobj = 1;
 
@@ -584,7 +503,7 @@ hostobjs(void)
 		h = &hostobj[i];
 		f = Bopen(h->file, OREAD);
 		if(f == nil) {
-			cursym = S;
+			ctxt->cursym = S;
 			diag("cannot reopen %s: %r", h->pn);
 			errorexit();
 		}
@@ -653,7 +572,7 @@ hostlink(void)
 		p = strchr(p + 1, ' ');
 	}
 
-	argv = malloc((10+nhostobj+nldflag+c)*sizeof argv[0]);
+	argv = malloc((14+nhostobj+nldflag+c)*sizeof argv[0]);
 	argc = 0;
 	if(extld == nil)
 		extld = "gcc";
@@ -665,11 +584,27 @@ hostlink(void)
 	case '6':
 		argv[argc++] = "-m64";
 		break;
+	case '5':
+		argv[argc++] = "-marm";
+		break;
 	}
-	if(!debug['s'])
+	if(!debug['s'] && !debug_s) {
 		argv[argc++] = "-gdwarf-2"; 
+	} else {
+		argv[argc++] = "-s";
+	}
 	if(HEADTYPE == Hdarwin)
 		argv[argc++] = "-Wl,-no_pie,-pagezero_size,4000000";
+	if(HEADTYPE == Hopenbsd)
+		argv[argc++] = "-Wl,-nopie";
+	
+	if(iself && AssumeGoldLinker)
+		argv[argc++] = "-Wl,--rosegment";
+
+	if(flag_shared) {
+		argv[argc++] = "-Wl,-Bsymbolic";
+		argv[argc++] = "-shared";
+	}
 	argv[argc++] = "-o";
 	argv[argc++] = outfile;
 	
@@ -680,13 +615,16 @@ hostlink(void)
 	if(iself)
 		argv[argc++] = "-rdynamic";
 
+	if(strstr(argv[0], "clang") != nil)
+		argv[argc++] = "-Qunused-arguments";
+
 	// already wrote main object file
 	// copy host objects to temporary directory
 	for(i=0; i<nhostobj; i++) {
 		h = &hostobj[i];
 		f = Bopen(h->file, OREAD);
 		if(f == nil) {
-			cursym = S;
+			ctxt->cursym = S;
 			diag("cannot reopen %s: %r", h->pn);
 			errorexit();
 		}
@@ -695,7 +633,7 @@ hostlink(void)
 		argv[argc++] = p;
 		w = create(p, 1, 0775);
 		if(w < 0) {
-			cursym = S;
+			ctxt->cursym = S;
 			diag("cannot create %s: %r", p);
 			errorexit();
 		}
@@ -707,7 +645,7 @@ hostlink(void)
 			len -= n;
 		}
 		if(close(w) < 0) {
-			cursym = S;
+			ctxt->cursym = S;
 			diag("cannot write %s: %r", p);
 			errorexit();
 		}
@@ -725,6 +663,20 @@ hostlink(void)
 		if(*p == '\0')
 			break;
 		argv[argc++] = p;
+
+		// clang, unlike GCC, passes -rdynamic to the linker
+		// even when linking with -static, causing a linker
+		// error when using GNU ld.  So take out -rdynamic if
+		// we added it.  We do it in this order, rather than
+		// only adding -rdynamic later, so that -extldflags
+		// can override -rdynamic without using -static.
+		if(iself && strncmp(p, "-static", 7) == 0 && (p[7]==' ' || p[7]=='\0')) {
+			for(i=0; i<argc; i++) {
+				if(strcmp(argv[i], "-rdynamic") == 0)
+					argv[i] = "-static";
+			}
+		}
+
 		p = strchr(p + 1, ' ');
 	}
 
@@ -740,7 +692,7 @@ hostlink(void)
 	}
 
 	if(runcmd(argv) < 0) {
-		cursym = S;
+		ctxt->cursym = S;
 		diag("%s: running %s failed: %r", argv0, argv[0]);
 		errorexit();
 	}
@@ -759,10 +711,10 @@ ldobj(Biobuf *f, char *pkg, int64 len, char *pn, char *file, int whence)
 
 	pn = estrdup(pn);
 
-	c1 = Bgetc(f);
-	c2 = Bgetc(f);
-	c3 = Bgetc(f);
-	c4 = Bgetc(f);
+	c1 = BGETC(f);
+	c2 = BGETC(f);
+	c3 = BGETC(f);
+	c4 = BGETC(f);
 	Bungetc(f);
 	Bungetc(f);
 	Bungetc(f);
@@ -808,8 +760,8 @@ ldobj(Biobuf *f, char *pkg, int64 len, char *pn, char *file, int whence)
 		return;
 	}
 	
-	// First, check that the basic goos, string, and version match.
-	t = smprint("%s %s %s ", goos, thestring, getgoversion());
+	// First, check that the basic goos, goarch, and version match.
+	t = smprint("%s %s %s ", goos, getgoarch(), getgoversion());
 	line[n] = ' ';
 	if(strncmp(line+10, t, strlen(t)) != 0 && !debug['f']) {
 		line[n] = '\0';
@@ -840,12 +792,12 @@ ldobj(Biobuf *f, char *pkg, int64 len, char *pn, char *file, int whence)
 	/* skip over exports and other info -- ends with \n!\n */
 	import0 = Boffset(f);
 	c1 = '\n';	// the last line ended in \n
-	c2 = Bgetc(f);
-	c3 = Bgetc(f);
+	c2 = BGETC(f);
+	c3 = BGETC(f);
 	while(c1 != '\n' || c2 != '!' || c3 != '\n') {
 		c1 = c2;
 		c2 = c3;
-		c3 = Bgetc(f);
+		c3 = BGETC(f);
 		if(c3 == Beof)
 			goto eof;
 	}
@@ -855,7 +807,7 @@ ldobj(Biobuf *f, char *pkg, int64 len, char *pn, char *file, int whence)
 	ldpkg(f, pkg, import1 - import0 - 2, pn, whence);	// -2 for !\n
 	Bseek(f, import1, 0);
 
-	ldobj1(f, pkg, eof - Boffset(f), pn);
+	ldobjfile(ctxt, f, pkg, eof - Boffset(f), pn);
 	free(pn);
 	return;
 
@@ -864,329 +816,13 @@ eof:
 	free(pn);
 }
 
-Sym*
-newsym(char *symb, int v)
-{
-	Sym *s;
-	int l;
-
-	l = strlen(symb) + 1;
-	s = mal(sizeof(*s));
-	if(debug['v'] > 1)
-		Bprint(&bso, "newsym %s\n", symb);
-
-	s->dynid = -1;
-	s->plt = -1;
-	s->got = -1;
-	s->name = mal(l + 1);
-	memmove(s->name, symb, l);
-
-	s->type = 0;
-	s->version = v;
-	s->value = 0;
-	s->sig = 0;
-	s->size = 0;
-	nsymbol++;
-
-	s->allsym = allsym;
-	allsym = s;
-
-	return s;
-}
-
-static Sym*
-_lookup(char *symb, int v, int creat)
-{
-	Sym *s;
-	char *p;
-	int32 h;
-	int c;
-
-	h = v;
-	for(p=symb; c = *p; p++)
-		h = h+h+h + c;
-	// not if(h < 0) h = ~h, because gcc 4.3 -O2 miscompiles it.
-	h &= 0xffffff;
-	h %= NHASH;
-	for(s = hash[h]; s != S; s = s->hash)
-		if(strcmp(s->name, symb) == 0)
-			return s;
-	if(!creat)
-		return nil;
-
-	s = newsym(symb, v);
-	s->extname = s->name;
-	s->hash = hash[h];
-	hash[h] = s;
-
-	return s;
-}
-
-Sym*
-lookup(char *name, int v)
-{
-	return _lookup(name, v, 1);
-}
-
-// read-only lookup
-Sym*
-rlookup(char *name, int v)
-{
-	return _lookup(name, v, 0);
-}
-
-void
-copyhistfrog(char *buf, int nbuf)
-{
-	char *p, *ep;
-	int i;
-
-	p = buf;
-	ep = buf + nbuf;
-	for(i=0; i<histfrogp; i++) {
-		p = seprint(p, ep, "%s", histfrog[i]->name+1);
-		if(i+1<histfrogp && (p == buf || p[-1] != '/'))
-			p = seprint(p, ep, "/");
-	}
-}
-
-void
-addhist(int32 line, int type)
-{
-	Auto *u;
-	Sym *s;
-	int i, j, k;
-
-	u = mal(sizeof(Auto));
-	s = mal(sizeof(Sym));
-	s->name = mal(2*(histfrogp+1) + 1);
-
-	u->asym = s;
-	u->type = type;
-	u->aoffset = line;
-	u->link = curhist;
-	curhist = u;
-
-	s->name[0] = 0;
-	j = 1;
-	for(i=0; i<histfrogp; i++) {
-		k = histfrog[i]->value;
-		s->name[j+0] = k>>8;
-		s->name[j+1] = k;
-		j += 2;
-	}
-	s->name[j] = 0;
-	s->name[j+1] = 0;
-}
-
-void
-histtoauto(void)
-{
-	Auto *l;
-
-	while(l = curhist) {
-		curhist = l->link;
-		l->link = curauto;
-		curauto = l;
-	}
-}
-
-void
-collapsefrog(Sym *s)
-{
-	int i;
-
-	/*
-	 * bad encoding of path components only allows
-	 * MAXHIST components. if there is an overflow,
-	 * first try to collapse xxx/..
-	 */
-	for(i=1; i<histfrogp; i++)
-		if(strcmp(histfrog[i]->name+1, "..") == 0) {
-			memmove(histfrog+i-1, histfrog+i+1,
-				(histfrogp-i-1)*sizeof(histfrog[0]));
-			histfrogp--;
-			goto out;
-		}
-
-	/*
-	 * next try to collapse .
-	 */
-	for(i=0; i<histfrogp; i++)
-		if(strcmp(histfrog[i]->name+1, ".") == 0) {
-			memmove(histfrog+i, histfrog+i+1,
-				(histfrogp-i-1)*sizeof(histfrog[0]));
-			goto out;
-		}
-
-	/*
-	 * last chance, just truncate from front
-	 */
-	memmove(histfrog+0, histfrog+1,
-		(histfrogp-1)*sizeof(histfrog[0]));
-
-out:
-	histfrog[histfrogp-1] = s;
-}
-
-void
-nuxiinit(void)
-{
-	int i, c;
-
-	for(i=0; i<4; i++) {
-		c = find1(0x04030201L, i+1);
-		if(i < 2)
-			inuxi2[i] = c;
-		if(i < 1)
-			inuxi1[i] = c;
-		inuxi4[i] = c;
-		if(c == i) {
-			inuxi8[i] = c;
-			inuxi8[i+4] = c+4;
-		} else {
-			inuxi8[i] = c+4;
-			inuxi8[i+4] = c;
-		}
-		fnuxi4[i] = c;
-		fnuxi8[i] = c;
-		fnuxi8[i+4] = c+4;
-	}
-	if(debug['v']) {
-		Bprint(&bso, "inuxi = ");
-		for(i=0; i<1; i++)
-			Bprint(&bso, "%d", inuxi1[i]);
-		Bprint(&bso, " ");
-		for(i=0; i<2; i++)
-			Bprint(&bso, "%d", inuxi2[i]);
-		Bprint(&bso, " ");
-		for(i=0; i<4; i++)
-			Bprint(&bso, "%d", inuxi4[i]);
-		Bprint(&bso, " ");
-		for(i=0; i<8; i++)
-			Bprint(&bso, "%d", inuxi8[i]);
-		Bprint(&bso, "\nfnuxi = ");
-		for(i=0; i<4; i++)
-			Bprint(&bso, "%d", fnuxi4[i]);
-		Bprint(&bso, " ");
-		for(i=0; i<8; i++)
-			Bprint(&bso, "%d", fnuxi8[i]);
-		Bprint(&bso, "\n");
-	}
-	Bflush(&bso);
-}
-
-int
-find1(int32 l, int c)
-{
-	char *p;
-	int i;
-
-	p = (char*)&l;
-	for(i=0; i<4; i++)
-		if(*p++ == c)
-			return i;
-	return 0;
-}
-
-int
-find2(int32 l, int c)
-{
-	union {
-		int32 l;
-		short p[2];
-	} u;
-	short *p;
-	int i;
-
-	u.l = l;
-	p = u.p;
-	for(i=0; i<4; i+=2) {
-		if(((*p >> 8) & 0xff) == c)
-			return i;
-		if((*p++ & 0xff) == c)
-			return i+1;
-	}
-	return 0;
-}
-
-int32
-ieeedtof(Ieee *e)
-{
-	int exp;
-	int32 v;
-
-	if(e->h == 0)
-		return 0;
-	exp = (e->h>>20) & ((1L<<11)-1L);
-	exp -= (1L<<10) - 2L;
-	v = (e->h & 0xfffffL) << 3;
-	v |= (e->l >> 29) & 0x7L;
-	if((e->l >> 28) & 1) {
-		v++;
-		if(v & 0x800000L) {
-			v = (v & 0x7fffffL) >> 1;
-			exp++;
-		}
-	}
-	if(-148 <= exp && exp <= -126) {
-		v |= 1<<23;
-		v >>= -125 - exp;
-		exp = -126;
-	}
-	else if(exp < -148 || exp >= 130)
-		diag("double fp to single fp overflow: %.17g", ieeedtod(e));
-	v |= ((exp + 126) & 0xffL) << 23;
-	v |= e->h & 0x80000000L;
-	return v;
-}
-
-double
-ieeedtod(Ieee *ieeep)
-{
-	Ieee e;
-	double fr;
-	int exp;
-
-	if(ieeep->h & (1L<<31)) {
-		e.h = ieeep->h & ~(1L<<31);
-		e.l = ieeep->l;
-		return -ieeedtod(&e);
-	}
-	if(ieeep->l == 0 && ieeep->h == 0)
-		return 0;
-	exp = (ieeep->h>>20) & ((1L<<11)-1L);
-	exp -= (1L<<10) - 2L;
-	fr = ieeep->l & ((1L<<16)-1L);
-	fr /= 1L<<16;
-	fr += (ieeep->l>>16) & ((1L<<16)-1L);
-	fr /= 1L<<16;
-	if(exp == -(1L<<10) - 2L) {
-		fr += (ieeep->h & (1L<<20)-1L);
-		exp++;
-	} else
-		fr += (ieeep->h & (1L<<20)-1L) | (1L<<20);
-	fr /= 1L<<21;
-	return ldexp(fr, exp);
-}
-
 void
 zerosig(char *sp)
 {
-	Sym *s;
+	LSym *s;
 
-	s = lookup(sp, 0);
+	s = linklookup(ctxt, sp, 0);
 	s->sig = 0;
-}
-
-int32
-Bget4(Biobuf *f)
-{
-	uchar p[4];
-
-	if(Bread(f, p, 4) != 4)
-		return 0;
-	return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
 }
 
 void
@@ -1194,7 +830,10 @@ mywhatsys(void)
 {
 	goroot = getgoroot();
 	goos = getgoos();
-	goarch = thestring;	// ignore $GOARCH - we know who we are
+	goarch = getgoarch();
+
+	if(strncmp(goarch, thestring, strlen(thestring)) != 0)
+		sysfatal("cannot use %cc with GOARCH=%s", thechar, goarch);
 }
 
 int
@@ -1255,7 +894,8 @@ unmal(void *v, uint32 n)
  * Invalid bytes turn into %xx.	 Right now the only bytes that need
  * escaping are %, ., and ", but we escape all control characters too.
  *
- * Must be same as ../gc/subr.c:/^pathtoprefix.
+ * If you edit this, edit ../gc/subr.c:/^pathtoprefix too.
+ * If you edit this, edit ../../pkg/debug/goobj/read.go:/importPathToPrefix too.
  */
 static char*
 pathtoprefix(char *s)
@@ -1309,13 +949,6 @@ iconv(Fmt *fp)
 	return 0;
 }
 
-void
-mangle(char *file)
-{
-	fprint(2, "%s: mangled input file\n", file);
-	errorexit();
-}
-
 Section*
 addsection(Segment *seg, char *name, int rwx)
 {
@@ -1333,143 +966,6 @@ addsection(Segment *seg, char *name, int rwx)
 	return sect;
 }
 
-void
-pclntab(void)
-{
-	vlong oldpc;
-	Prog *p;
-	int32 oldlc, v, s;
-	Sym *sym;
-	uchar *bp;
-	
-	sym = lookup("pclntab", 0);
-	sym->type = SPCLNTAB;
-	sym->reachable = 1;
-	if(debug['s'])
-		return;
-
-	oldpc = INITTEXT;
-	oldlc = 0;
-	for(cursym = textp; cursym != nil; cursym = cursym->next) {
-		for(p = cursym->text; p != P; p = p->link) {
-			if(p->line == oldlc || p->as == ATEXT || p->as == ANOP) {
-				if(debug['O'])
-					Bprint(&bso, "%6llux %P\n",
-						(vlong)p->pc, p);
-				continue;
-			}
-			if(debug['O'])
-				Bprint(&bso, "\t\t%6d", lcsize);
-			v = (p->pc - oldpc) / MINLC;
-			while(v) {
-				s = 127;
-				if(v < 127)
-					s = v;
-				symgrow(sym, lcsize+1);
-				bp = sym->p + lcsize;
-				*bp = s+128;	/* 129-255 +pc */
-				if(debug['O'])
-					Bprint(&bso, " pc+%d*%d(%d)", s, MINLC, s+128);
-				v -= s;
-				lcsize++;
-			}
-			s = p->line - oldlc;
-			oldlc = p->line;
-			oldpc = p->pc + MINLC;
-			if(s > 64 || s < -64) {
-				symgrow(sym, lcsize+5);
-				bp = sym->p + lcsize;
-				*bp++ = 0;	/* 0 vv +lc */
-				*bp++ = s>>24;
-				*bp++ = s>>16;
-				*bp++ = s>>8;
-				*bp = s;
-				if(debug['O']) {
-					if(s > 0)
-						Bprint(&bso, " lc+%d(%d,%d)\n",
-							s, 0, s);
-					else
-						Bprint(&bso, " lc%d(%d,%d)\n",
-							s, 0, s);
-					Bprint(&bso, "%6llux %P\n",
-						(vlong)p->pc, p);
-				}
-				lcsize += 5;
-				continue;
-			}
-			symgrow(sym, lcsize+1);
-			bp = sym->p + lcsize;
-			if(s > 0) {
-				*bp = 0+s;	/* 1-64 +lc */
-				if(debug['O']) {
-					Bprint(&bso, " lc+%d(%d)\n", s, 0+s);
-					Bprint(&bso, "%6llux %P\n",
-						(vlong)p->pc, p);
-				}
-			} else {
-				*bp = 64-s;	/* 65-128 -lc */
-				if(debug['O']) {
-					Bprint(&bso, " lc%d(%d)\n", s, 64-s);
-					Bprint(&bso, "%6llux %P\n",
-						(vlong)p->pc, p);
-				}
-			}
-			lcsize++;
-		}
-	}
-	if(lcsize & 1) {
-		symgrow(sym, lcsize+1);
-		sym->p[lcsize] = 129;
-		lcsize++;
-	}
-	sym->size = lcsize;
-	lcsize = 0;
-
-	if(debug['v'] || debug['O'])
-		Bprint(&bso, "lcsize = %d\n", lcsize);
-	Bflush(&bso);
-}
-
-#define	LOG	5
-void
-mkfwd(void)
-{
-	Prog *p;
-	int i;
-	int32 dwn[LOG], cnt[LOG];
-	Prog *lst[LOG];
-
-	for(i=0; i<LOG; i++) {
-		if(i == 0)
-			cnt[i] = 1;
-		else
-			cnt[i] = LOG * cnt[i-1];
-		dwn[i] = 1;
-		lst[i] = P;
-	}
-	i = 0;
-	for(cursym = textp; cursym != nil; cursym = cursym->next) {
-		for(p = cursym->text; p != P; p = p->link) {
-			if(p->link == P) {
-				if(cursym->next)
-					p->forwd = cursym->next->text;
-				break;
-			}
-			i--;
-			if(i < 0)
-				i = LOG-1;
-			p->forwd = P;
-			dwn[i]--;
-			if(dwn[i] <= 0) {
-				dwn[i] = cnt[i];
-				if(lst[i] != P)
-					lst[i]->forwd = p;
-				lst[i] = p;
-			}
-		}
-	}
-}
-
 uint16
 le16(uchar *b)
 {
@@ -1479,7 +975,7 @@ le16(uchar *b)
 uint32
 le32(uchar *b)
 {
-	return b[0] | b[1]<<8 | b[2]<<16 | b[3]<<24;
+	return b[0] | b[1]<<8 | b[2]<<16 | (uint32)b[3]<<24;
 }
 
 uint64
@@ -1497,7 +993,7 @@ be16(uchar *b)
 uint32
 be32(uchar *b)
 {
-	return b[0]<<24 | b[1]<<16 | b[2]<<8 | b[3];
+	return (uint32)b[0]<<24 | b[1]<<16 | b[2]<<8 | b[3];
 }
 
 uint64
@@ -1512,7 +1008,7 @@ Endian le = { le16, le32, le64 };
 typedef struct Chain Chain;
 struct Chain
 {
-	Sym *sym;
+	LSym *sym;
 	Chain *up;
 	int limit;  // limit on entry to sym
 };
@@ -1520,67 +1016,87 @@ struct Chain
 static int stkcheck(Chain*, int);
 static void stkprint(Chain*, int);
 static void stkbroke(Chain*, int);
-static Sym *morestack;
-static Sym *newstack;
+static LSym *morestack;
+static LSym *newstack;
 
 enum
 {
 	HasLinkRegister = (thechar == '5'),
-	CallSize = (!HasLinkRegister)*PtrSize,	// bytes of stack required for a call
 };
+
+// TODO: Record enough information in new object files to
+// allow stack checks here.
+
+static int
+callsize(void)
+{
+	if(thechar == '5')
+		return 0;
+	return RegSize;
+}
 
 void
 dostkcheck(void)
 {
 	Chain ch;
-	Sym *s;
+	LSym *s;
 	
-	morestack = lookup("runtime.morestack", 0);
-	newstack = lookup("runtime.newstack", 0);
+	morestack = linklookup(ctxt, "runtime.morestack", 0);
+	newstack = linklookup(ctxt, "runtime.newstack", 0);
 
-	// First the nosplits on their own.
-	for(s = textp; s != nil; s = s->next) {
-		if(s->text == nil || s->text->link == nil || (s->text->textflag & NOSPLIT) == 0)
+	// Every splitting function ensures that there are at least StackLimit
+	// bytes available below SP when the splitting prologue finishes.
+	// If the splitting function calls F, then F begins execution with
+	// at least StackLimit - callsize() bytes available.
+	// Check that every function behaves correctly with this amount
+	// of stack, following direct calls in order to piece together chains
+	// of non-splitting functions.
+	ch.up = nil;
+	ch.limit = StackLimit - callsize();
+
+	// Check every function, but do the nosplit functions in a first pass,
+	// to make the printed failure chains as short as possible.
+	for(s = ctxt->textp; s != nil; s = s->next) {
+		// runtime.racesymbolizethunk is called from gcc-compiled C
+		// code running on the operating system thread stack.
+		// It uses more than the usual amount of stack but that's okay.
+		if(strcmp(s->name, "runtime.racesymbolizethunk") == 0)
 			continue;
-		cursym = s;
-		ch.up = nil;
+
+		if(s->nosplit) {
+		ctxt->cursym = s;
 		ch.sym = s;
-		ch.limit = StackLimit - CallSize;
-		stkcheck(&ch, 0);
-		s->stkcheck = 1;
-	}
-	
-	// Check calling contexts.
-	// Some nosplits get called a little further down,
-	// like newproc and deferproc.	We could hard-code
-	// that knowledge but it's more robust to look at
-	// the actual call sites.
-	for(s = textp; s != nil; s = s->next) {
-		if(s->text == nil || s->text->link == nil || (s->text->textflag & NOSPLIT) != 0)
-			continue;
-		cursym = s;
-		ch.up = nil;
-		ch.sym = s;
-		ch.limit = StackLimit - CallSize;
 		stkcheck(&ch, 0);
 	}
+	}
+	for(s = ctxt->textp; s != nil; s = s->next) {
+		if(!s->nosplit) {
+		ctxt->cursym = s;
+		ch.sym = s;
+		stkcheck(&ch, 0);
+	}
+}
 }
 
 static int
 stkcheck(Chain *up, int depth)
 {
 	Chain ch, ch1;
-	Prog *p;
-	Sym *s;
-	int limit, prolog;
+	LSym *s;
+	int limit;
+	Reloc *r, *endr;
+	Pciter pcsp;
 	
 	limit = up->limit;
 	s = up->sym;
-	p = s->text;
 	
-	// Small optimization: don't repeat work at top.
-	if(s->stkcheck && limit == StackLimit-CallSize)
+	// Don't duplicate work: only need to consider each
+	// function at top of safe zone once.
+	if(limit == StackLimit-callsize()) {
+		if(s->stkcheck)
 		return 0;
+		s->stkcheck = 1;
+	}
 	
 	if(depth > 100) {
 		diag("nosplit stack check too deep");
@@ -1588,11 +1104,11 @@ stkcheck(Chain *up, int depth)
 		return -1;
 	}
 
-	if(p == nil || p->link == nil) {
+	if(s->external || s->pcln == nil) {
 		// external function.
 		// should never be called directly.
 		// only diagnose the direct caller.
-		if(depth == 1)
+		if(depth == 1 && s->type != SXREF)
 			diag("call to external function %s", s->name);
 		return -1;
 	}
@@ -1608,50 +1124,56 @@ stkcheck(Chain *up, int depth)
 		return 0;
 
 	ch.up = up;
-	prolog = (s->text->textflag & NOSPLIT) == 0;
-	for(p = s->text; p != P; p = p->link) {
-		limit -= p->spadj;
-		if(prolog && p->spadj != 0) {
-			// The first stack adjustment in a function with a
-			// split-checking prologue marks the end of the
-			// prologue.  Assuming the split check is correct,
-			// after the adjustment there should still be at least
-			// StackLimit bytes available below the stack pointer.
-			// If this is not the top call in the chain, no need
-			// to duplicate effort, so just stop.
-			if(depth > 0)
-				return 0;
-			prolog = 0;
-			limit = StackLimit;
-		}
-		if(limit < 0) {
-			stkbroke(up, limit);
+	
+	// Walk through sp adjustments in function, consuming relocs.
+	r = s->r;
+	endr = r + s->nr;
+	for(pciterinit(ctxt, &pcsp, &s->pcln->pcsp); !pcsp.done; pciternext(&pcsp)) {
+		// pcsp.value is in effect for [pcsp.pc, pcsp.nextpc).
+
+		// Check stack size in effect for this span.
+		if(limit - pcsp.value < 0) {
+			stkbroke(up, limit - pcsp.value);
 			return -1;
 		}
-		if(iscall(p)) {
-			limit -= CallSize;
-			ch.limit = limit;
-			if(p->to.type == D_BRANCH) {
+
+		// Process calls in this span.
+		for(; r < endr && r->off < pcsp.nextpc; r++) {
+			switch(r->type) {
+			case R_CALL:
+			case R_CALLARM:
 				// Direct call.
-				ch.sym = p->to.sym;
+				ch.limit = limit - pcsp.value - callsize();
+				ch.sym = r->sym;
 				if(stkcheck(&ch, depth+1) < 0)
 					return -1;
-			} else {
-				// Indirect call.  Assume it is a splitting function,
+
+				// If this is a call to morestack, we've just raised our limit back
+				// to StackLimit beyond the frame size.
+				if(strncmp(r->sym->name, "runtime.morestack", 17) == 0) {
+					limit = StackLimit + s->locals;
+					if(thechar == '5')
+						limit += 4; // saved LR
+				}
+				break;
+
+			case R_CALLIND:
+				// Indirect call.  Assume it is a call to a splitting function,
 				// so we have to make sure it can call morestack.
-				limit -= CallSize;
+				// Arrange the data structures to report both calls, so that
+				// if there is an error, stkprint shows all the steps involved.
+				ch.limit = limit - pcsp.value - callsize();
 				ch.sym = nil;
-				ch1.limit = limit;
+				ch1.limit = ch.limit - callsize(); // for morestack in called prologue
 				ch1.up = &ch;
 				ch1.sym = morestack;
 				if(stkcheck(&ch1, depth+2) < 0)
 					return -1;
-				limit += CallSize;
+				break;
 			}
-			limit += CallSize;
+		}
 		}
 		
-	}
 	return 0;
 }
 
@@ -1674,7 +1196,7 @@ stkprint(Chain *ch, int limit)
 
 	if(ch->up == nil) {
 		// top of chain.  ch->sym != nil.
-		if(ch->sym->text->textflag & NOSPLIT)
+		if(ch->sym->nosplit)
 			print("\t%d\tassumed on entry to %s\n", ch->limit, name);
 		else
 			print("\t%d\tguaranteed after split check in %s\n", ch->limit, name);
@@ -1688,52 +1210,14 @@ stkprint(Chain *ch, int limit)
 }
 
 int
-headtype(char *name)
-{
-	int i;
-
-	for(i=0; headers[i].name; i++)
-		if(strcmp(name, headers[i].name) == 0) {
-			headstring = headers[i].name;
-			return headers[i].val;
-		}
-	fprint(2, "unknown header type -H %s\n", name);
-	errorexit();
-	return -1;  // not reached
-}
-
-char*
-headstr(int v)
-{
-	static char buf[20];
-	int i;
-
-	for(i=0; headers[i].name; i++)
-		if(v == headers[i].val)
-			return headers[i].name;
-	snprint(buf, sizeof buf, "%d", v);
-	return buf;
-}
-
-void
-undef(void)
-{
-	Sym *s;
-
-	for(s = allsym; s != S; s = s->allsym)
-		if(s->type == SXREF)
-			diag("%s(%d): not defined", s->name, s->version);
-}
-
-int
 Yconv(Fmt *fp)
 {
-	Sym *s;
+	LSym *s;
 	Fmt fmt;
 	int i;
 	char *str;
 
-	s = va_arg(fp->args, Sym*);
+	s = va_arg(fp->args, LSym*);
 	if (s == S) {
 		fmtprint(fp, "<nil>");
 	} else {
@@ -1827,6 +1311,14 @@ usage(void)
 void
 setheadtype(char *s)
 {
+	int h;
+	
+	h = headtype(s);
+	if(h < 0) {
+		fprint(2, "unknown header type -H %s\n", s);
+		errorexit();
+	}
+	headstring = s;
 	HEADTYPE = headtype(s);
 }
 
@@ -1845,22 +1337,22 @@ doversion(void)
 }
 
 void
-genasmsym(void (*put)(Sym*, char*, int, vlong, vlong, int, Sym*))
+genasmsym(void (*put)(LSym*, char*, int, vlong, vlong, int, LSym*))
 {
 	Auto *a;
-	Sym *s;
+	LSym *s;
 	int32 off;
 
 	// These symbols won't show up in the first loop below because we
 	// skip STEXT symbols. Normal STEXT symbols are emitted by walking textp.
-	s = lookup("text", 0);
+	s = linklookup(ctxt, "text", 0);
 	if(s->type == STEXT)
 		put(s, s->name, 'T', s->value, s->size, s->version, 0);
-	s = lookup("etext", 0);
+	s = linklookup(ctxt, "etext", 0);
 	if(s->type == STEXT)
 		put(s, s->name, 'T', s->value, s->size, s->version, 0);
 
-	for(s=allsym; s!=S; s=s->allsym) {
+	for(s=ctxt->allsym; s!=S; s=s->allsym) {
 		if(s->hide || (s->name[0] == '.' && s->version == 0 && strcmp(s->name, ".rathole") != 0))
 			continue;
 		switch(s->type&SMASK) {
@@ -1896,36 +1388,20 @@ genasmsym(void (*put)(Sym*, char*, int, vlong, vlong, int, Sym*))
 		}
 	}
 
-	for(s = textp; s != nil; s = s->next) {
-		if(s->text == nil)
-			continue;
-
-		/* filenames first */
-		for(a=s->autom; a; a=a->link)
-			if(a->type == D_FILE)
-				put(nil, a->asym->name, 'z', a->aoffset, 0, 0, 0);
-			else
-			if(a->type == D_FILE1)
-				put(nil, a->asym->name, 'Z', a->aoffset, 0, 0, 0);
-
+	for(s = ctxt->textp; s != nil; s = s->next) {
 		put(s, s->name, 'T', s->value, s->size, s->version, s->gotype);
 
-		/* frame, locals, args, auto and param after */
-		put(nil, ".frame", 'm', (uint32)s->text->to.offset+PtrSize, 0, 0, 0);
-		put(nil, ".locals", 'm', s->locals, 0, 0, 0);
-		if(s->text->textflag & NOSPLIT)
-			put(nil, ".args", 'm', ArgsSizeUnknown, 0, 0, 0);
-		else
-			put(nil, ".args", 'm', s->args, 0, 0, 0);
+		// NOTE(ality): acid can't produce a stack trace without .frame symbols
+		put(nil, ".frame", 'm', s->locals+PtrSize, 0, 0, 0);
 
 		for(a=s->autom; a; a=a->link) {
 			// Emit a or p according to actual offset, even if label is wrong.
 			// This avoids negative offsets, which cannot be encoded.
-			if(a->type != D_AUTO && a->type != D_PARAM)
+			if(a->type != A_AUTO && a->type != A_PARAM)
 				continue;
 			
 			// compute offset relative to FP
-			if(a->type == D_PARAM)
+			if(a->type == A_PARAM)
 				off = a->aoffset;
 			else
 				off = a->aoffset - PtrSize;
@@ -1947,30 +1423,130 @@ genasmsym(void (*put)(Sym*, char*, int, vlong, vlong, int, Sym*))
 		}
 	}
 	if(debug['v'] || debug['n'])
-		Bprint(&bso, "symsize = %ud\n", symsize);
+		Bprint(&bso, "%5.2f symsize = %ud\n", cputime(), symsize);
 	Bflush(&bso);
 }
 
-char*
-estrdup(char *p)
+vlong
+symaddr(LSym *s)
 {
-	p = strdup(p);
-	if(p == nil) {
-		cursym = S;
-		diag("out of memory");
-		errorexit();
-	}
-	return p;
+	if(!s->reachable)
+		diag("unreachable symbol in symaddr - %s", s->name);
+	return s->value;
 }
 
-void*
-erealloc(void *p, long n)
+void
+xdefine(char *p, int t, vlong v)
 {
-	p = realloc(p, n);
-	if(p == nil) {
-		cursym = S;
-		diag("out of memory");
+	LSym *s;
+
+	s = linklookup(ctxt, p, 0);
+	s->type = t;
+	s->value = v;
+	s->reachable = 1;
+	s->special = 1;
+}
+
+vlong
+datoff(vlong addr)
+{
+	if(addr >= segdata.vaddr)
+		return addr - segdata.vaddr + segdata.fileoff;
+	if(addr >= segtext.vaddr)
+		return addr - segtext.vaddr + segtext.fileoff;
+	diag("datoff %#llx", addr);
+	return 0;
+}
+
+vlong
+entryvalue(void)
+{
+	char *a;
+	LSym *s;
+
+	a = INITENTRY;
+	if(*a >= '0' && *a <= '9')
+		return atolwhex(a);
+	s = linklookup(ctxt, a, 0);
+	if(s->type == 0)
+		return INITTEXT;
+	if(s->type != STEXT)
+		diag("entry not text: %s", s->name);
+	return s->value;
+}
+
+static void
+undefsym(LSym *s)
+{
+	int i;
+	Reloc *r;
+
+	ctxt->cursym = s;
+	for(i=0; i<s->nr; i++) {
+		r = &s->r[i];
+		if(r->sym == nil) // happens for some external ARM relocs
+			continue;
+		if(r->sym->type == Sxxx || r->sym->type == SXREF)
+			diag("undefined: %s", r->sym->name);
+		if(!r->sym->reachable)
+			diag("use of unreachable symbol: %s", r->sym->name);
+	}
+}
+
+void
+undef(void)
+{
+	LSym *s;
+	
+	for(s = ctxt->textp; s != nil; s = s->next)
+		undefsym(s);
+	for(s = datap; s != nil; s = s->next)
+		undefsym(s);
+	if(nerrors > 0)
+		errorexit();
+}
+
+void
+callgraph(void)
+{
+	LSym *s;
+	Reloc *r;
+	int i;
+
+	if(!debug['c'])
+		return;
+
+	for(s = ctxt->textp; s != nil; s = s->next) {
+		for(i=0; i<s->nr; i++) {
+			r = &s->r[i];
+			if(r->sym == nil)
+				continue;
+			if((r->type == R_CALL || r->type == R_CALLARM) && r->sym->type == STEXT)
+				Bprint(&bso, "%s calls %s\n", s->name, r->sym->name);
+		}
+	}
+}
+
+void
+diag(char *fmt, ...)
+{
+	char buf[1024], *tn, *sep;
+	va_list arg;
+
+	tn = "";
+	sep = "";
+	if(ctxt->cursym != S) {
+		tn = ctxt->cursym->name;
+		sep = ": ";
+	}
+	va_start(arg, fmt);
+	vseprint(buf, buf+sizeof(buf), fmt, arg);
+	va_end(arg);
+	print("%s%s%s\n", tn, sep, buf);
+
+	nerrors++;
+	if(nerrors > 20) {
+		print("too many errors\n");
 		errorexit();
 	}
-	return p;
 }

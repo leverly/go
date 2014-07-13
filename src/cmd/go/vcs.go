@@ -91,7 +91,7 @@ var vcsGit = &vcsCmd{
 	cmd:  "git",
 
 	createCmd:   "clone {repo} {dir}",
-	downloadCmd: "fetch",
+	downloadCmd: "pull --ff-only",
 
 	tagCmd: []tagCmd{
 		// tags/xxx matches a git tag named xxx
@@ -102,7 +102,7 @@ var vcsGit = &vcsCmd{
 		{"show-ref tags/{tag} origin/{tag}", `((?:tags|origin)/\S+)$`},
 	},
 	tagSyncCmd:     "checkout {tag}",
-	tagSyncDefault: "checkout origin/master",
+	tagSyncDefault: "checkout master",
 
 	scheme:  []string{"git", "https", "http", "git+ssh"},
 	pingCmd: "ls-remote {scheme}://{repo}",
@@ -223,7 +223,34 @@ func (v *vcsCmd) create(dir, repo string) error {
 
 // download downloads any new changes for the repo in dir.
 func (v *vcsCmd) download(dir string) error {
+	if err := v.fixDetachedHead(dir); err != nil {
+		return err
+	}
 	return v.run(dir, v.downloadCmd)
+}
+
+// fixDetachedHead switches a Git repository in dir from a detached head to the master branch.
+// Go versions before 1.2 downloaded Git repositories in an unfortunate way
+// that resulted in the working tree state being on a detached head.
+// That meant the repository was not usable for normal Git operations.
+// Go 1.2 fixed that, but we can't pull into a detached head, so if this is
+// a Git repository we check for being on a detached head and switch to the
+// real branch, almost always called "master".
+// TODO(dsymonds): Consider removing this for Go 1.3.
+func (v *vcsCmd) fixDetachedHead(dir string) error {
+	if v != vcsGit {
+		return nil
+	}
+
+	// "git symbolic-ref HEAD" succeeds iff we are not on a detached head.
+	if err := v.runVerboseOnly(dir, "symbolic-ref HEAD"); err == nil {
+		// not on a detached head
+		return nil
+	}
+	if buildV {
+		log.Printf("%s on detached head; repairing", dir)
+	}
+	return v.run(dir, "checkout master")
 }
 
 // tags returns the list of available tags for the repo in dir.
@@ -294,6 +321,7 @@ func vcsForDir(p *Package) (vcs *vcsCmd, root string, err error) {
 		return nil, "", fmt.Errorf("directory %q is outside source root %q", dir, srcRoot)
 	}
 
+	origDir := dir
 	for len(dir) > len(srcRoot) {
 		for _, vcs := range vcsList {
 			if fi, err := os.Stat(filepath.Join(dir, "."+vcs.cmd)); err == nil && fi.IsDir() {
@@ -310,7 +338,7 @@ func vcsForDir(p *Package) (vcs *vcsCmd, root string, err error) {
 		dir = ndir
 	}
 
-	return nil, "", fmt.Errorf("directory %q is not using a known version control system", dir)
+	return nil, "", fmt.Errorf("directory %q is not using a known version control system", origDir)
 }
 
 // repoRoot represents a version control system, a repo, and a root of
@@ -325,6 +353,8 @@ type repoRoot struct {
 	// repository
 	root string
 }
+
+var httpPrefixRE = regexp.MustCompile(`^https?:`)
 
 // repoRootForImportPath analyzes importPath to determine the
 // version control system, and code repository to use.
@@ -362,8 +392,12 @@ var errUnknownSite = errors.New("dynamic lookup required to find mapping")
 //
 // If scheme is non-empty, that scheme is forced.
 func repoRootForImportPathStatic(importPath, scheme string) (*repoRoot, error) {
-	if strings.Contains(importPath, "://") {
-		return nil, fmt.Errorf("invalid import path %q", importPath)
+	// A common error is to use https://packagepath because that's what
+	// hg and git require. Diagnose this helpfully.
+	if loc := httpPrefixRE.FindStringIndex(importPath); loc != nil {
+		// The importPath has been cleaned, so has only one slash. The pattern
+		// ignores the slashes; the error message puts them back on the RHS at least.
+		return nil, fmt.Errorf("%q not allowed in import path", importPath[loc[0]:loc[1]]+"//")
 	}
 	for _, srv := range vcsPaths {
 		if !strings.HasPrefix(importPath, srv.prefix) {
@@ -442,7 +476,11 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
 		return nil, fmt.Errorf("http/https fetch: %v", err)
 	}
 	defer body.Close()
-	metaImport, err := matchGoImport(parseMetaGoImports(body), importPath)
+	imports, err := parseMetaGoImports(body)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %v", importPath, err)
+	}
+	metaImport, err := matchGoImport(imports, importPath)
 	if err != nil {
 		if err != errNoMatch {
 			return nil, fmt.Errorf("parse %s: %v", urlStr, err)
@@ -467,7 +505,10 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %v", urlStr, err)
 		}
-		imports := parseMetaGoImports(body)
+		imports, err := parseMetaGoImports(body)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %v", importPath, err)
+		}
 		if len(imports) == 0 {
 			return nil, fmt.Errorf("fetch %s: no go-import meta tag", urlStr)
 		}

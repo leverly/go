@@ -9,56 +9,17 @@
 #include "../gc/go.h"
 #include "../5l/5.out.h"
 
-typedef	struct	Addr	Addr;
-
-struct	Addr
-{
-	int32	offset;
-	int32	offset2;
-
-	union {
-		double	dval;
-		vlong	vval;
-		Prog*	branch;
-		char	sval[NSNAME];
-	} u;
-
-	Sym*	sym;
-	Sym*	gotype;
-	Node*	node;
-	int	width;
-	uchar	type;
-	char	name;
-	uchar	reg;
-	uchar	etype;
-};
-#define	A	((Addr*)0)
-
-struct	Prog
-{
-	uint32	loc;		// pc offset in this func
-	uint32	lineno;		// source line that generated this
-	Prog*	link;		// next instruction in this func
-	void*	regp;		// points to enclosing Reg struct
-	short	as;		// opcode
-	uchar	reg;		// doubles as width in DATA op
-	uchar	scond;
-	Addr	from;		// src address
-	Addr	to;		// dst address
-};
-
 #define TEXTFLAG reg
 
 #define REGALLOC_R0 0
 #define REGALLOC_RMAX REGEXT
-#define REGALLOC_F0 (REGALLOC_RMAX+1)
+#define REGALLOC_F0 NREG
 #define REGALLOC_FMAX (REGALLOC_F0 + FREGEXT)
 
 EXTERN	int32	dynloc;
 EXTERN	uchar	reg[REGALLOC_FMAX+1];
 EXTERN	int32	pcloc;		// instruction counter
 EXTERN	Strlit	emptystring;
-extern	char*	anames[];
 EXTERN	Prog	zprog;
 EXTERN	Node*	newproc;
 EXTERN	Node*	deferproc;
@@ -67,13 +28,11 @@ EXTERN	Node*	panicindex;
 EXTERN	Node*	panicslice;
 EXTERN	Node*	throwreturn;
 extern	long	unmappedzero;
-EXTERN	int	maxstksize;
 
 /*
  * gen.c
  */
 void	compile(Node*);
-void	proglist(void);
 void	gen(Node*);
 Node*	lookdot(Node*, Node*, int);
 void	cgen_as(Node*, Node*);
@@ -120,7 +79,6 @@ void	cgen64(Node*, Node*);
  * gsubr.c
  */
 void	clearp(Prog*);
-void	proglist(void);
 Prog*	gbranch(int, Type*, int);
 Prog*	prog(int);
 void	gconv(int, int);
@@ -148,6 +106,7 @@ void	split64(Node*, Node*, Node*);
 void	splitclean(void);
 Node*	ncon(uint32 i);
 void	gtrack(Sym*);
+void	gargsize(int32);
 
 /*
  * obj.c
@@ -157,16 +116,6 @@ void	datastring(char*, int, Addr*);
 /*
  * list.c
  */
-int	Aconv(Fmt*);
-int	Cconv(Fmt*);
-int	Dconv(Fmt*);
-int	Mconv(Fmt*);
-int	Pconv(Fmt*);
-int	Rconv(Fmt*);
-int	Yconv(Fmt*);
 void	listinit(void);
 
 void	zaddr(Biobuf*, Addr*, int, int);
-
-#pragma	varargck	type	"D"	Addr*
-#pragma	varargck	type	"M"	Addr*

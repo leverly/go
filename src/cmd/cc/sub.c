@@ -116,7 +116,10 @@ prtree1(Node *n, int d, int f)
 		break;
 
 	case OLSTRING:
-		print(" \"%S\"", n->rstring);
+		if(sizeof(TRune) == sizeof(Rune))
+			print(" \"%S\"", (Rune*)n->rstring);
+		else
+			print(" \"...\"");
 		i = 0;
 		break;
 
@@ -2052,4 +2055,14 @@ int
 mixedasop(Type *l, Type *r)
 {
 	return !typefd[l->etype] && typefd[r->etype];
+}
+
+LSym*
+linksym(Sym *s)
+{
+	if(s == nil)
+		return nil;
+	if(s->lsym != nil)
+		return s->lsym;
+	return linklookup(ctxt, s->name, s->class == CSTATIC);
 }

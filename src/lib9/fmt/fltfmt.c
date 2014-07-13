@@ -103,7 +103,7 @@ xadd1(char *a, int n)
 	for(b = a+n-1; b >= a; b--) {
 		c = *b + 1;
 		if(c <= '9') {
-			*b = c;
+			*b = (char)c;
 			return 0;
 		}
 		*b = '0';
@@ -144,7 +144,7 @@ xsub1(char *a, int n)
 				*b = '9';
 				return 1;
 			}
-			*b = c;
+			*b = (char)c;
 			return 0;
 		}
 		*b = '9';
@@ -154,6 +154,7 @@ xsub1(char *a, int n)
 	 * so that it has a nonzero first digit.
 	 */
 	abort();
+	return 0;
 }
 
 /*
@@ -173,14 +174,14 @@ xfmtexp(char *p, int e, int ucase)
 		*p++ = '+';
 	i = 0;
 	while(e) {
-		se[i++] = e % 10 + '0';
+		se[i++] = (char)(e % 10 + '0');
 		e /= 10;
 	}
 	while(i < 2)
 		se[i++] = '0';
 	while(i > 0)
 		*p++ = se[--i];
-	*p++ = '\0';
+	*p = '\0';
 }
 
 /*
@@ -192,7 +193,9 @@ xfmtexp(char *p, int e, int ucase)
 static void
 xdtoa(double f, char *s, int *exp, int *neg, int *ns)
 {
-	int c, d, e2, e, ee, i, ndigit, oerrno;
+	int d, e2, e, ee, i, ndigit;
+	int oerrno;
+	char c;
 	char tmp[NSIGNIF+10];
 	double g;
 
@@ -239,7 +242,7 @@ xdtoa(double f, char *s, int *exp, int *neg, int *ns)
 	 */
 	for(i=0; i<NSIGNIF; i++) {
 		d = (int)g;
-		s[i] = d+'0';
+		s[i] = (char)(d+'0');
 		g = (g-d) * 10;
 	}
 	s[i] = 0;
@@ -350,12 +353,13 @@ __efgfmt(Fmt *fmt)
 {
 	char buf[NSIGNIF+10], *dot, *digits, *p, *s, suf[10], *t;
 	double f;
-	int c, chr, dotwid, e, exp, fl, ndigits, neg, newndigits;
+	int c, chr, dotwid, e, exp, ndigits, neg, newndigits;
 	int pad, point, prec, realchr, sign, sufwid, ucase, wid, z1, z2;
+	ulong fl;
 	Rune r, *rs, *rt;
 
 	if(fmt->flags&FmtLong)
-		f = va_arg(fmt->args, long double);
+		f = (double)va_arg(fmt->args, long double);
 	else
 		f = va_arg(fmt->args, double);
 
@@ -367,7 +371,7 @@ __efgfmt(Fmt *fmt)
 	prec = FDEFLT;
 	if(fl & FmtPrec)
 		prec = fmt->prec;
-	chr = fmt->r;
+	chr = (int)fmt->r;
 	ucase = 0;
 	switch(chr) {
 	case 'A':
@@ -386,7 +390,7 @@ __efgfmt(Fmt *fmt)
 		s = special[0+ucase];
 	special:
 		fmt->flags = fl & (FmtWidth|FmtLeft);
-		return __fmtcpy(fmt, s, strlen(s), strlen(s));
+		return __fmtcpy(fmt, s, (int)strlen(s), (int)strlen(s));
 	}
 	if(__isInf(f, 1)) {
 		s = special[2+ucase];
@@ -488,7 +492,7 @@ __efgfmt(Fmt *fmt)
 			z2 = 0;
 		}
 		xfmtexp(suf, e, ucase);
-		sufwid = strlen(suf);
+		sufwid = (int)strlen(suf);
 		break;
 
 	casef:
@@ -638,7 +642,7 @@ __efgfmt(Fmt *fmt)
 				}
 			}
 		}
-		fmt->nfmt += rt - (Rune*)fmt->to;
+		fmt->nfmt += (int)(rt - (Rune*)fmt->to);
 		fmt->to = rt;
 		if(sufwid && __fmtcpy(fmt, suf, sufwid, sufwid) < 0)
 			return -1;
@@ -667,7 +671,7 @@ __efgfmt(Fmt *fmt)
 				for(p=dot; *p; p++)
 					FMTCHAR(fmt, t, s, *p);
 		}
-		fmt->nfmt += t - (char*)fmt->to;
+		fmt->nfmt += (int)(t - (char*)fmt->to);
 		fmt->to = t;
 		if(sufwid && __fmtcpy(fmt, suf, sufwid, sufwid) < 0)
 			return -1;

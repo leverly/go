@@ -14,7 +14,6 @@
 #define	ungetc	ccungetc
 
 extern int yychar;
-int windows;
 int yyprev;
 int yylast;
 
@@ -41,6 +40,19 @@ static struct {
 } exper[] = {
 //	{"rune32", &rune32},
 	{"fieldtrack", &fieldtrack_enabled},
+	{"precisestack", &precisestack_enabled},
+	{nil, nil},
+};
+
+// Debug arguments.
+// These can be specified with the -d flag, as in "-d checknil"
+// to set the debug_checknil variable. In general the list passed
+// to -d can be comma-separated.
+static struct {
+	char *name;
+	int *val;
+} debugtab[] = {
+	{"nil", &debug_checknil},
 	{nil, nil},
 };
 
@@ -48,7 +60,7 @@ static void
 addexp(char *s)
 {
 	int i;
-	
+
 	for(i=0; exper[i].name != nil; i++) {
 		if(strcmp(exper[i].name, s) == 0) {
 			*exper[i].val = 1;
@@ -65,8 +77,10 @@ setexp(void)
 {
 	char *f[20];
 	int i, nf;
-	
-	// The makefile #defines GOEXPERIMENT for us.
+
+	precisestack_enabled = 1; // on by default
+
+	// cmd/dist #defines GOEXPERIMENT for us.
 	nf = getfields(GOEXPERIMENT, f, nelem(f), 1, ",");
 	for(i=0; i<nf; i++)
 		addexp(f[i]);
@@ -152,6 +166,21 @@ fault(int s)
 	fatal("fault");
 }
 
+#ifdef	PLAN9
+void
+catcher(void *v, char *s)
+{
+	USED(v);
+
+	if(strncmp(s, "sys: trap: fault read", 21) == 0) {
+		if(nsavederrors + nerrors > 0)
+			errorexit();
+		fatal("fault");
+	}
+	noted(NDFLT);
+}
+#endif
+
 void
 doversion(void)
 {
@@ -175,6 +204,24 @@ main(int argc, char *argv[])
 	signal(SIGBUS, fault);
 	signal(SIGSEGV, fault);
 #endif
+
+#ifdef	PLAN9
+	notify(catcher);
+	// Tell the FPU to handle all exceptions.
+	setfcr(FPPDBL|FPRNR);
+#endif
+	// Allow GOARCH=thestring or GOARCH=thestringsuffix,
+	// but not other values.	
+	p = getgoarch();
+	if(strncmp(p, thestring, strlen(thestring)) != 0)
+		sysfatal("cannot use %cg with GOARCH=%s", thechar, p);
+	goarch = p;
+
+	linkarchinit();
+	ctxt = linknew(thelinkarch);
+	ctxt->diag = yyerror;
+	ctxt->bso = &bstdout;
+	Binit(&bstdout, 1, OWRITE);
 
 	localpkg = mkpkg(strlit(""));
 	localpkg->prefix = "\"\"";
@@ -216,8 +263,11 @@ main(int argc, char *argv[])
 
 	goroot = getgoroot();
 	goos = getgoos();
-	goarch = thestring;
-	
+
+	nacl = strcmp(goos, "nacl") == 0;
+	if(nacl)
+		flag_largemodel = 1;
+
 	setexp();
 
 	outfile = nil;
@@ -238,20 +288,25 @@ main(int argc, char *argv[])
 	flagfn0("V", "print compiler version", doversion);
 	flagcount("W", "debug parse tree after type checking", &debug['W']);
 	flagcount("complete", "compiling complete package (no C or assembly)", &pure_go);
-	flagcount("d", "debug declarations", &debug['d']);
+	flagstr("d", "list: print debug information about items in list", &debugstr);
 	flagcount("e", "no limit on number of errors reported", &debug['e']);
 	flagcount("f", "debug stack frames", &debug['f']);
 	flagcount("g", "debug code generation", &debug['g']);
 	flagcount("h", "halt on error", &debug['h']);
 	flagcount("i", "debug line number stack", &debug['i']);
+	flagstr("installsuffix", "pkg directory suffix", &flag_installsuffix);
 	flagcount("j", "debug runtime-initialized variables", &debug['j']);
 	flagcount("l", "disable inlining", &debug['l']);
+	flagcount("live", "debug liveness analysis", &debuglive);
 	flagcount("m", "print optimization decisions", &debug['m']);
+	flagcount("nolocalimports", "reject local (relative) imports", &nolocalimports);
 	flagstr("o", "obj: set output file", &outfile);
 	flagstr("p", "path: set expected package import path", &myimportpath);
+	flagcount("pack", "write package file instead of object file", &writearchive);
 	flagcount("r", "debug generated wrappers", &debug['r']);
 	flagcount("race", "enable race detector", &flag_race);
 	flagcount("s", "warn about composite literals that can be simplified", &debug['s']);
+	flagstr("trimpath", "prefix: remove prefix from recorded source file paths", &ctxt->trimpath);
 	flagcount("u", "reject unsafe code", &safemode);
 	flagcount("v", "increase debug verbosity", &debug['v']);
 	flagcount("w", "debug type checking", &debug['w']);
@@ -261,6 +316,7 @@ main(int argc, char *argv[])
 		flagcount("largemodel", "generate code that assumes a large memory model", &flag_largemodel);
 
 	flagparse(&argc, &argv, usage);
+	ctxt->debugasm = debug['S'];
 
 	if(argc < 1)
 		usage();
@@ -268,6 +324,24 @@ main(int argc, char *argv[])
 	if(flag_race) {
 		racepkg = mkpkg(strlit("runtime/race"));
 		racepkg->name = "race";
+	}
+	
+	// parse -d argument
+	if(debugstr) {
+		char *f[100];
+		int i, j, nf;
+		
+		nf = getfields(debugstr, f, nelem(f), 1, ",");
+		for(i=0; i<nf; i++) {
+			for(j=0; debugtab[j].name != nil; j++) {
+				if(strcmp(debugtab[j].name, f[i]) == 0) {
+					*debugtab[j].val = 1;
+					break;
+				}
+			}
+			if(j == nelem(debugtab))
+				fatal("unknown debug information -d '%s'\n", f[i]);
+		}
 	}
 
 	// enable inlining.  for now:
@@ -285,20 +359,6 @@ main(int argc, char *argv[])
 			use_sse = 1;
 		else
 			sysfatal("unsupported setting GO386=%s", p);
-	}
-
-	pathname = mal(1000);
-	if(getwd(pathname, 999) == 0)
-		strcpy(pathname, "/???");
-
-	if(yy_isalpha(pathname[0]) && pathname[1] == ':') {
-		// On Windows.
-		windows = 1;
-
-		// Canonicalize path by converting \ to / (Windows accepts both).
-		for(p=pathname; *p; p++)
-			if(*p == '\\')
-				*p = '/';
 	}
 
 	fmtinstallgo();
@@ -329,6 +389,8 @@ main(int argc, char *argv[])
 		curio.peekc = 0;
 		curio.peekc1 = 0;
 		curio.nlsemi = 0;
+		curio.eofnl = 0;
+		curio.last = 0;
 
 		// Skip initial BOM if present.
 		if(Bgetrune(curio.bin) != BOM)
@@ -416,6 +478,10 @@ main(int argc, char *argv[])
 	// Phase 5: Escape analysis.
 	if(!debug['N'])
 		escapes(xtop);
+	
+	// Escape analysis moved escaped values off stack.
+	// Move large values off stack too.
+	movelarge(xtop);
 
 	// Phase 6: Compile top level functions.
 	for(l=xtop; l; l=l->next)
@@ -489,12 +555,13 @@ skiptopkgdef(Biobuf *b)
 		return 0;
 	if(memcmp(p, "!<arch>\n", 8) != 0)
 		return 0;
-	/* symbol table is first; skip it */
+	/* symbol table may be first; skip it */
 	sz = arsize(b, "__.GOSYMDEF");
-	if(sz < 0)
-		return 0;
-	Bseek(b, sz, 1);
-	/* package export block is second */
+	if(sz >= 0)
+		Bseek(b, sz, 1);
+	else
+		Bseek(b, 8, 0);
+	/* package export block is next */
 	sz = arsize(b, "__.PKGDEF");
 	if(sz <= 0)
 		return 0;
@@ -522,7 +589,7 @@ islocalname(Strlit *name)
 {
 	if(name->len >= 1 && name->s[0] == '/')
 		return 1;
-	if(windows && name->len >= 3 &&
+	if(ctxt->windows && name->len >= 3 &&
 	   yy_isalpha(name->s[0]) && name->s[1] == ':' && name->s[2] == '/')
 	   	return 1;
 	if(name->len >= 2 && strncmp(name->s, "./", 2) == 0)
@@ -540,10 +607,10 @@ static int
 findpkg(Strlit *name)
 {
 	Idir *p;
-	char *q, *race;
+	char *q, *suffix, *suffixsep;
 
 	if(islocalname(name)) {
-		if(safemode)
+		if(safemode || nolocalimports)
 			return 0;
 		// try .a before .6.  important for building libraries:
 		// if there is an array.6 in the array.a library,
@@ -578,13 +645,19 @@ findpkg(Strlit *name)
 			return 1;
 	}
 	if(goroot != nil) {
-		race = "";
-		if(flag_race)
-			race = "_race";
-		snprint(namebuf, sizeof(namebuf), "%s/pkg/%s_%s%s/%Z.a", goroot, goos, goarch, race, name);
+		suffix = "";
+		suffixsep = "";
+		if(flag_installsuffix != nil) {
+			suffixsep = "_";
+			suffix = flag_installsuffix;
+		} else if(flag_race) {
+			suffixsep = "_";
+			suffix = "race";
+		}
+		snprint(namebuf, sizeof(namebuf), "%s/pkg/%s_%s%s%s/%Z.a", goroot, goos, goarch, suffixsep, suffix, name);
 		if(access(namebuf, 0) >= 0)
 			return 1;
-		snprint(namebuf, sizeof(namebuf), "%s/pkg/%s_%s%s/%Z.%c", goroot, goos, goarch, race, name, thechar);
+		snprint(namebuf, sizeof(namebuf), "%s/pkg/%s_%s%s%s/%Z.%c", goroot, goos, goarch, suffixsep, suffix, name, thechar);
 		if(access(namebuf, 0) >= 0)
 			return 1;
 	}
@@ -658,7 +731,7 @@ importfile(Val *f, int line)
 			fakeimport();
 			return;
 		}
-		prefix = pathname;
+		prefix = ctxt->pathname;
 		if(localimport != nil)
 			prefix = localimport;
 		cleanbuf = mal(strlen(prefix) + strlen(path->s) + 2);
@@ -716,7 +789,7 @@ importfile(Val *f, int line)
 			yyerror("import %s: not a go object file", file);
 			errorexit();
 		}
-		q = smprint("%s %s %s %s", getgoos(), thestring, getgoversion(), expstring());
+		q = smprint("%s %s %s %s", getgoos(), getgoarch(), getgoversion(), expstring());
 		if(strcmp(p+10, q) != 0) {
 			yyerror("import %s: object is [%s] expected [%s]", file, p+10, q);
 			errorexit();
@@ -1484,7 +1557,7 @@ getlinepragma(void)
 		goto out;
 
 	// try to avoid allocating file name over and over
-	for(h=hist; h!=H; h=h->link) {
+	for(h=ctxt->hist; h!=nil; h=h->link) {
 		if(h->name != nil && strcmp(h->name, lexbuf) == 0) {
 			linehist(h->name, n, 0);
 			goto out;
@@ -1580,10 +1653,10 @@ getc(void)
 			curio.cp++;
 	} else {
 	loop:
-		c = Bgetc(curio.bin);
+		c = BGETC(curio.bin);
 		if(c == 0xef) {
-			c1 = Bgetc(curio.bin);
-			c2 = Bgetc(curio.bin);
+			c1 = BGETC(curio.bin);
+			c2 = BGETC(curio.bin);
 			if(c1 == 0xbb && c2 == 0xbf) {
 				yyerrorl(lexlineno, "Unicode (UTF-8) BOM in middle of file");
 				goto loop;
@@ -1602,7 +1675,7 @@ check:
 		}
 	case EOF:
 		// insert \n at EOF
-		if(curio.eofnl)
+		if(curio.eofnl || curio.last == '\n')
 			return EOF;
 		curio.eofnl = 1;
 		c = '\n';
@@ -1611,6 +1684,7 @@ check:
 			lexlineno++;
 		break;
 	}
+	curio.last = c;
 	return c;
 }
 
@@ -1971,27 +2045,27 @@ lexinit1(void)
 	// error type
 	s = lookup("error");
 	s->lexical = LNAME;
-	errortype = t;
-	errortype->sym = s;
 	s1 = pkglookup("error", builtinpkg);
+	errortype = t;
+	errortype->sym = s1;
 	s1->lexical = LNAME;
 	s1->def = typenod(errortype);
 
 	// byte alias
 	s = lookup("byte");
 	s->lexical = LNAME;
-	bytetype = typ(TUINT8);
-	bytetype->sym = s;
 	s1 = pkglookup("byte", builtinpkg);
+	bytetype = typ(TUINT8);
+	bytetype->sym = s1;
 	s1->lexical = LNAME;
 	s1->def = typenod(bytetype);
 
 	// rune alias
 	s = lookup("rune");
 	s->lexical = LNAME;
-	runetype = typ(TINT32);
-	runetype->sym = s;
 	s1 = pkglookup("rune", builtinpkg);
+	runetype = typ(TINT32);
+	runetype->sym = s1;
 	s1->lexical = LNAME;
 	s1->def = typenod(runetype);
 }
@@ -2098,14 +2172,18 @@ struct
 } lexn[] =
 {
 	LANDAND,	"ANDAND",
+	LANDNOT,	"ANDNOT",
 	LASOP,		"ASOP",
 	LBREAK,		"BREAK",
 	LCASE,		"CASE",
 	LCHAN,		"CHAN",
 	LCOLAS,		"COLAS",
+	LCOMM,		"<-",
 	LCONST,		"CONST",
 	LCONTINUE,	"CONTINUE",
+	LDDD,		"...",
 	LDEC,		"DEC",
+	LDEFAULT,	"DEFAULT",
 	LDEFER,		"DEFER",
 	LELSE,		"ELSE",
 	LEQ,		"EQ",
@@ -2132,6 +2210,7 @@ struct
 	LRANGE,		"RANGE",
 	LRETURN,	"RETURN",
 	LRSH,		"RSH",
+	LSELECT,	"SELECT",
 	LSTRUCT,	"STRUCT",
 	LSWITCH,	"SWITCH",
 	LTYPE,		"TYPE",
@@ -2162,6 +2241,7 @@ struct
 	"LASOP",	"op=",
 	"LBREAK",	"break",
 	"LCASE",	"case",
+	"LCHAN",	"chan",
 	"LCOLAS",	":=",
 	"LCONST",	"const",
 	"LCONTINUE",	"continue",
@@ -2242,6 +2322,28 @@ yytinit(void)
 	}		
 }
 
+static void
+pkgnotused(int lineno, Strlit *path, char *name)
+{
+	char *elem;
+	
+	// If the package was imported with a name other than the final
+	// import path element, show it explicitly in the error message.
+	// Note that this handles both renamed imports and imports of
+	// packages containing unconventional package declarations.
+	// Note that this uses / always, even on Windows, because Go import
+	// paths always use forward slashes.
+	elem = strrchr(path->s, '/');
+	if(elem != nil)
+		elem++;
+	else
+		elem = path->s;
+	if(name == nil || strcmp(elem, name) == 0)
+		yyerrorl(lineno, "imported and not used: \"%Z\"", path);
+	else
+		yyerrorl(lineno, "imported and not used: \"%Z\" as %s", path, name);
+}
+
 void
 mkpackage(char* pkgname)
 {
@@ -2267,7 +2369,7 @@ mkpackage(char* pkgname)
 					// errors if a conflicting top-level name is
 					// introduced by a different file.
 					if(!s->def->used && !nsyntaxerrors)
-						yyerrorl(s->def->lineno, "imported and not used: \"%Z\"", s->def->pkg->path);
+						pkgnotused(s->def->lineno, s->def->pkg->path, s->name);
 					s->def = N;
 					continue;
 				}
@@ -2275,7 +2377,7 @@ mkpackage(char* pkgname)
 					// throw away top-level name left over
 					// from previous import . "x"
 					if(s->def->pack != N && !s->def->pack->used && !nsyntaxerrors) {
-						yyerrorl(s->def->pack->lineno, "imported and not used: \"%Z\"", s->def->pack->pkg->path);
+						pkgnotused(s->def->pack->lineno, s->def->pack->pkg->path, nil);
 						s->def->pack->used = 1;
 					}
 					s->def = N;
@@ -2287,7 +2389,7 @@ mkpackage(char* pkgname)
 
 	if(outfile == nil) {
 		p = strrchr(infile, '/');
-		if(windows) {
+		if(ctxt->windows) {
 			q = strrchr(infile, '\\');
 			if(q > p)
 				p = q;

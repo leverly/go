@@ -1,3 +1,5 @@
+// +build !plan9
+
 /*
 Inferno lib9/strecpy.c
 http://code.google.com/p/inferno-os/source/browse/lib9/strecpy.c
@@ -32,7 +34,7 @@ strecpy(char *to, char *e, char *from)
 {
 	if(to >= e)
 		return to;
-	to = memccpy(to, from, '\0', e - to);
+	to = memccpy(to, from, '\0', (size_t)(e - to));
 	if(to == nil){
 		to = e - 1;
 		*to = '\0';

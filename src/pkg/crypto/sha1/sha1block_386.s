@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../../cmd/ld/textflag.h"
+
 // SHA1 block routine. See sha1block.go for Go equivalent.
 //
 // There are 80 rounds of 4 types:
@@ -44,12 +46,10 @@
 	ADDL	DI, e
 
 #define FUNC1(a, b, c, d, e) \
-	MOVL	b, SI; \
-	ANDL	c, SI; \
-	MOVL	b, DI; \
-	NOTL	DI; \
-	ANDL	d, DI; \
-	ORL	SI, DI
+	MOVL	d, DI; \
+	XORL	c, DI; \
+	ANDL	b, DI; \
+	XORL	d, DI
 
 #define FUNC2(a, b, c, d, e) \
 	MOVL	b, DI; \
@@ -99,7 +99,7 @@
 	MIX(a, b, c, d, e, 0xCA62C1D6)
 
 // func block(dig *digest, p []byte)
-TEXT ·block(SB),7,$92-16
+TEXT ·block(SB),NOSPLIT,$92-16
 	MOVL	dig+0(FP),	BP
 	MOVL	p+4(FP),	SI
 	MOVL	p_len+8(FP),	DX

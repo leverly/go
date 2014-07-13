@@ -63,7 +63,7 @@ md5write(MD5 *d, uchar *p, int nn)
 }
 
 uint64
-md5sum(MD5 *d)
+md5sum(MD5 *d, uint64 *hi)
 {
 	uchar tmp[64];
 	int i;
@@ -87,6 +87,8 @@ md5sum(MD5 *d)
 	if(d->nx != 0)
 		fatal("md5sum");
 
+	if(hi != nil)
+		*hi = d->s[2] | ((uint64)d->s[3]<<32);
 	return d->s[0] | ((uint64)d->s[1]<<32);
 }
 
@@ -196,7 +198,7 @@ md5block(MD5 *dig, uchar *p, int nn)
 
 		for(i=0; i<16; i++) {
 			j = i*4;
-			X[i] = p[j] | (p[j+1]<<8) | (p[j+2]<<16) | (p[j+3]<<24);
+			X[i] = p[j] | (p[j+1]<<8) | (p[j+2]<<16) | ((uint32)p[j+3]<<24);
 		}
 
 		// Round 1.
