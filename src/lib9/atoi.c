@@ -1,3 +1,5 @@
+// +build !plan9
+
 /*
 Plan 9 from User Space src/lib9/ato*.c
 http://code.swtch.com/plan9port/src/tip/src/lib9/atoi.c
@@ -29,7 +31,7 @@ THE SOFTWARE.
 int
 atoi(char *s)
 {
-	return strtol(s, 0, 0);
+	return (int)strtol(s, 0, 0);
 }
 
 long

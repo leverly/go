@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// TODO(rsc): Rewrite all nn(SP) references into name+(nn-8)(FP)
+// so that go vet can check that they are correct.
+
+#include "../../cmd/ld/textflag.h"
+
 //
 // System calls for AMD64, Linux
 //
@@ -11,7 +16,7 @@
 // Note that this differs from "standard" ABI convention, which
 // would pass 4th arg in CX, not R10.
 
-TEXT	·Syscall(SB),7,$0
+TEXT	·Syscall(SB),NOSPLIT,$0-56
 	CALL	runtime·entersyscall(SB)
 	MOVQ	16(SP), DI
 	MOVQ	24(SP), SI
@@ -36,7 +41,7 @@ ok:
 	CALL	runtime·exitsyscall(SB)
 	RET
 
-TEXT ·Syscall6(SB),7,$0
+TEXT ·Syscall6(SB),NOSPLIT,$0-80
 	CALL	runtime·entersyscall(SB)
 	MOVQ	16(SP), DI
 	MOVQ	24(SP), SI
@@ -61,7 +66,7 @@ ok6:
 	CALL	runtime·exitsyscall(SB)
 	RET
 
-TEXT ·RawSyscall(SB),7,$0
+TEXT ·RawSyscall(SB),NOSPLIT,$0-56
 	MOVQ	16(SP), DI
 	MOVQ	24(SP), SI
 	MOVQ	32(SP), DX
@@ -83,7 +88,7 @@ ok1:
 	MOVQ	$0, 56(SP)	// errno
 	RET
 
-TEXT ·RawSyscall6(SB),7,$0
+TEXT ·RawSyscall6(SB),NOSPLIT,$0-80
 	MOVQ	16(SP), DI
 	MOVQ	24(SP), SI
 	MOVQ	32(SP), DX
@@ -105,7 +110,7 @@ ok2:
 	MOVQ	$0, 80(SP)	// errno
 	RET
 
-TEXT ·Gettimeofday(SB),7,$0
+TEXT ·gettimeofday(SB),NOSPLIT,$0-16
 	MOVQ	8(SP), DI
 	MOVQ	$0, SI
 	MOVQ	runtime·__vdso_gettimeofday_sym(SB), AX
@@ -118,12 +123,4 @@ TEXT ·Gettimeofday(SB),7,$0
 	RET
 ok7:
 	MOVQ	$0, 16(SP)  // errno
-	RET
-
-TEXT ·Time(SB),7,$0
-	MOVQ	8(SP), DI
-	MOVQ	runtime·__vdso_time_sym(SB), AX
-	CALL	AX
-	MOVQ	AX, 16(SP)  // tt
-	MOVQ	$0, 24(SP)  // errno
 	RET

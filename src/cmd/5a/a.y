@@ -33,6 +33,7 @@
 #include <stdio.h>	/* if we don't, bison will, and a.h re-#defines getc */
 #include <libc.h>
 #include "a.h"
+#include "../../pkg/runtime/funcdata.h"
 %}
 %union
 {
@@ -40,7 +41,7 @@
 	int32	lval;
 	double	dval;
 	char	sval[8];
-	Gen	gen;
+	Addr	addr;
 }
 %left	'|'
 %left	'^'
@@ -50,19 +51,19 @@
 %left	'*' '/' '%'
 %token	<lval>	LTYPE1 LTYPE2 LTYPE3 LTYPE4 LTYPE5
 %token	<lval>	LTYPE6 LTYPE7 LTYPE8 LTYPE9 LTYPEA
-%token	<lval>	LTYPEB LTYPEC LTYPED LTYPEE LTYPEF
+%token	<lval>	LTYPEB LTYPEC LTYPED LTYPEE
 %token	<lval>	LTYPEG LTYPEH LTYPEI LTYPEJ LTYPEK
 %token	<lval>	LTYPEL LTYPEM LTYPEN LTYPEBX LTYPEPLD
 %token	<lval>	LCONST LSP LSB LFP LPC
-%token	<lval>	LTYPEX LR LREG LF LFREG LC LCREG LPSR LFCR
+%token	<lval>	LTYPEX LTYPEPC LTYPEF LR LREG LF LFREG LC LCREG LPSR LFCR
 %token	<lval>	LCOND LS LAT
 %token	<dval>	LFCONST
 %token	<sval>	LSCONST
 %token	<sym>	LNAME LLAB LVAR
 %type	<lval>	con expr oexpr pointer offset sreg spreg creg
 %type	<lval>	rcon cond reglist
-%type	<gen>	gen rel reg regreg freg shift fcon frcon
-%type	<gen>	imm ximm name oreg ireg nireg ioreg imsr
+%type	<addr>	gen rel reg regreg freg shift fcon frcon
+%type	<addr>	imm ximm name oreg ireg nireg ioreg imsr
 %%
 prog:
 |	prog
@@ -174,7 +175,7 @@ inst:
  */
 |	LTYPE8 cond ioreg ',' '[' reglist ']'
 	{
-		Gen g;
+		Addr g;
 
 		g = nullgen;
 		g.type = D_CONST;
@@ -183,7 +184,7 @@ inst:
 	}
 |	LTYPE8 cond '[' reglist ']' ',' ioreg
 	{
-		Gen g;
+		Addr g;
 
 		g = nullgen;
 		g.type = D_CONST;
@@ -217,10 +218,20 @@ inst:
  */
 |	LTYPEB name ',' imm
 	{
+		$4.type = D_CONST2;
+		$4.offset2 = ArgsSizeUnknown;
 		outcode($1, Always, &$2, 0, &$4);
 	}
 |	LTYPEB name ',' con ',' imm
 	{
+		$6.type = D_CONST2;
+		$6.offset2 = ArgsSizeUnknown;
+		outcode($1, Always, &$2, $4, &$6);
+	}
+|	LTYPEB name ',' con ',' imm '-' con
+	{
+		$6.type = D_CONST2;
+		$6.offset2 = $8;
 		outcode($1, Always, &$2, $4, &$6);
 	}
 /*
@@ -268,7 +279,7 @@ inst:
  */
 |	LTYPEJ cond con ',' expr ',' spreg ',' creg ',' creg oexpr
 	{
-		Gen g;
+		Addr g;
 
 		g = nullgen;
 		g.type = D_CONST;
@@ -283,7 +294,7 @@ inst:
 			(($11 & 15) << 0) |	/* Crm */
 			(($12 & 7) << 5) |	/* coprocessor information */
 			(1<<4);			/* must be set */
-		outcode(AWORD, Always, &nullgen, NREG, &g);
+		outcode(AMRC, Always, &nullgen, NREG, &g);
 	}
 /*
  * MULL r1,r2,(hi,lo)
@@ -308,6 +319,26 @@ inst:
 |	LTYPEPLD oreg
 	{
 		outcode($1, Always, &$2, NREG, &nullgen);
+	}
+/*
+ * PCDATA
+ */
+|	LTYPEPC gen ',' gen
+	{
+		if($2.type != D_CONST || $4.type != D_CONST)
+			yyerror("arguments to PCDATA must be integer constants");
+		outcode($1, Always, &$2, NREG, &$4);
+	}
+/*
+ * FUNCDATA
+ */
+|	LTYPEF gen ',' gen
+	{
+		if($2.type != D_CONST)
+			yyerror("index for FUNCDATA must be integer constant");
+		if($4.type != D_EXTERN && $4.type != D_STATIC && $4.type != D_OREG)
+			yyerror("value for FUNCDATA must be symbol reference");
+ 		outcode($1, Always, &$2, NREG, &$4);
 	}
 /*
  * END
@@ -346,14 +377,12 @@ rel:
 		if(pass == 2)
 			yyerror("undefined label: %s", $1->name);
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $2;
 	}
 |	LLAB offset
 	{
 		$$ = nullgen;
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $1->value + $2;
 	}
 
@@ -377,7 +406,7 @@ ximm:	'$' con
 	{
 		$$ = nullgen;
 		$$.type = D_SCONST;
-		memcpy($$.sval, $2, sizeof($$.sval));
+		memcpy($$.u.sval, $2, sizeof($$.u.sval));
 	}
 |	fcon
 
@@ -386,13 +415,13 @@ fcon:
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = $2;
+		$$.u.dval = $2;
 	}
 |	'$' '-' LFCONST
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = -$3;
+		$$.u.dval = -$3;
 	}
 
 reglist:
@@ -604,7 +633,7 @@ name:
 		$$ = nullgen;
 		$$.type = D_OREG;
 		$$.name = $3;
-		$$.sym = S;
+		$$.sym = nil;
 		$$.offset = $1;
 	}
 |	LNAME offset '(' pointer ')'
@@ -612,7 +641,7 @@ name:
 		$$ = nullgen;
 		$$.type = D_OREG;
 		$$.name = $4;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 0);
 		$$.offset = $2;
 	}
 |	LNAME '<' '>' offset '(' LSB ')'
@@ -620,7 +649,7 @@ name:
 		$$ = nullgen;
 		$$.type = D_OREG;
 		$$.name = D_STATIC;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 1);
 		$$.offset = $4;
 	}
 

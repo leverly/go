@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 )
 
 var (
@@ -43,6 +45,8 @@ var (
 
 	// letter is the build.ArchChar
 	letter string
+	
+	goos, goarch string
 
 	// dirs are the directories to look for *.go files in.
 	// TODO(bradfitz): just use all directories?
@@ -67,8 +71,12 @@ const maxTests = 5000
 func main() {
 	flag.Parse()
 
-	// Disable parallelism if printing
-	if *verbose {
+	goos = os.Getenv("GOOS")
+	goarch = os.Getenv("GOARCH")
+	findExecCmd()
+
+	// Disable parallelism if printing or if using a simulator.
+	if *verbose || len(findExecCmd()) > 0 {
 		*numParallel = 1
 	}
 
@@ -113,28 +121,39 @@ func main() {
 	failed := false
 	resCount := map[string]int{}
 	for _, test := range tests {
-		<-test.donec
-		_, isSkip := test.err.(skipError)
-		errStr := "pass"
-		if test.err != nil {
-			errStr = test.err.Error()
-			if !isSkip {
-				failed = true
+		<-test.donec		
+		status := "ok  "
+		errStr := ""
+		if _, isSkip := test.err.(skipError); isSkip {
+			status = "skip"
+			test.err = nil
+			if !skipOkay[path.Join(test.dir, test.gofile)] {
+				errStr = "unexpected skip for " + path.Join(test.dir, test.gofile) + ": " + errStr
+				status = "FAIL"
 			}
 		}
-		if isSkip && !skipOkay[path.Join(test.dir, test.gofile)] {
-			errStr = "unexpected skip for " + path.Join(test.dir, test.gofile) + ": " + errStr
-			isSkip = false
+		if test.err != nil {
+			status = "FAIL"
+			errStr = test.err.Error()
+		}
+		if status == "FAIL" {
 			failed = true
 		}
-		resCount[errStr]++
-		if isSkip && !*verbose && !*showSkips {
+		resCount[status]++
+		if status == "skip" && !*verbose && !*showSkips {
 			continue
 		}
-		if !*verbose && test.err == nil {
+		dt := fmt.Sprintf("%.3fs", test.dt.Seconds())
+		if status == "FAIL" {
+			fmt.Printf("# go run run.go -- %s\n%s\nFAIL\t%s\t%s\n",
+				path.Join(test.dir, test.gofile),
+				errStr, test.goFileName(), dt)
 			continue
 		}
-		fmt.Printf("%-20s %-20s: %s\n", test.action, test.goFileName(), errStr)
+		if !*verbose {
+			continue
+		}
+		fmt.Printf("%s\t%s\t%s\n", status, test.goFileName(), dt)
 	}
 
 	if *summary {
@@ -187,7 +206,7 @@ func compileInDir(runcmd runCmd, dir string, names ...string) (out []byte, err e
 
 func linkFile(runcmd runCmd, goname string) (err error) {
 	pfile := strings.Replace(goname, ".go", "."+letter, -1)
-	_, err = runcmd("go", "tool", ld, "-o", "a.exe", "-L", ".", pfile)
+	_, err = runcmd("go", "tool", ld, "-w", "-o", "a.exe", "-L", ".", pfile)
 	return
 }
 
@@ -206,7 +225,8 @@ func check(err error) {
 type test struct {
 	dir, gofile string
 	donec       chan bool // closed when done
-
+	dt time.Duration
+	
 	src    string
 	action string // "compile", "build", etc.
 
@@ -299,14 +319,17 @@ func goDirPackages(longdir string) ([][]string, error) {
 	return pkgs, nil
 }
 
+type context struct {
+	GOOS   string
+	GOARCH string
+}
+
 // shouldTest looks for build tags in a source file and returns
 // whether the file should be used according to the tags.
 func shouldTest(src string, goos, goarch string) (ok bool, whyNot string) {
 	if idx := strings.Index(src, "\npackage"); idx >= 0 {
 		src = src[:idx]
 	}
-	notgoos := "!" + goos
-	notgoarch := "!" + goarch
 	for _, line := range strings.Split(src, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "//") {
@@ -318,34 +341,68 @@ func shouldTest(src string, goos, goarch string) (ok bool, whyNot string) {
 		if len(line) == 0 || line[0] != '+' {
 			continue
 		}
+		ctxt := &context{
+			GOOS:   goos,
+			GOARCH: goarch,
+		}
 		words := strings.Fields(line)
 		if words[0] == "+build" {
-			for _, word := range words {
-				switch word {
-				case goos, goarch:
-					return true, ""
-				case notgoos, notgoarch:
-					continue
-				default:
-					if word[0] == '!' {
-						// NOT something-else
-						return true, ""
-					}
+			ok := false
+			for _, word := range words[1:] {
+				if ctxt.match(word) {
+					ok = true
+					break
 				}
 			}
-			// no matching tag found.
-			return false, line
+			if !ok {
+				// no matching tag found.
+				return false, line
+			}
 		}
 	}
-	// no build tags.
+	// no build tags
 	return true, ""
+}
+
+func (ctxt *context) match(name string) bool {
+	if name == "" {
+		return false
+	}
+	if i := strings.Index(name, ","); i >= 0 {
+		// comma-separated list
+		return ctxt.match(name[:i]) && ctxt.match(name[i+1:])
+	}
+	if strings.HasPrefix(name, "!!") { // bad syntax, reject always
+		return false
+	}
+	if strings.HasPrefix(name, "!") { // negation
+		return len(name) > 1 && !ctxt.match(name[1:])
+	}
+
+	// Tags must be letters, digits, underscores or dots.
+	// Unlike in Go identifiers, all digits are fine (e.g., "386").
+	for _, c := range name {
+		if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' && c != '.' {
+			return false
+		}
+	}
+
+	if name == ctxt.GOOS || name == ctxt.GOARCH {
+		return true
+	}
+
+	return false
 }
 
 func init() { checkShouldTest() }
 
 // run runs a test.
 func (t *test) run() {
-	defer close(t.donec)
+	start := time.Now()
+	defer func() {
+		t.dt = time.Since(start)
+		close(t.donec)
+	}()
 
 	srcBytes, err := ioutil.ReadFile(t.goFileName())
 	if err != nil {
@@ -362,7 +419,7 @@ func (t *test) run() {
 		t.err = errors.New("double newline not found")
 		return
 	}
-	if ok, why := shouldTest(t.src, runtime.GOOS, runtime.GOARCH); !ok {
+	if ok, why := shouldTest(t.src, goos, goarch); !ok {
 		t.action = "skip"
 		if *showSkips {
 			fmt.Printf("%-20s %-20s: %s\n", t.action, t.goFileName(), why)
@@ -422,8 +479,12 @@ func (t *test) run() {
 	check(err)
 
 	// A few tests (of things like the environment) require these to be set.
-	os.Setenv("GOOS", runtime.GOOS)
-	os.Setenv("GOARCH", runtime.GOARCH)
+	if os.Getenv("GOOS") == "" {
+		os.Setenv("GOOS", runtime.GOOS)
+	}
+	if os.Getenv("GOARCH") == "" {
+		os.Setenv("GOARCH", runtime.GOARCH)
+	}
 
 	useTmp := true
 	runcmd := func(args ...string) ([]byte, error) {
@@ -538,7 +599,11 @@ func (t *test) run() {
 					t.err = err
 					return
 				}
-				out, err := runcmd(append([]string{filepath.Join(t.tempDir, "a.exe")}, args...)...)
+				var cmd []string
+				cmd = append(cmd, findExecCmd()...)
+				cmd = append(cmd, filepath.Join(t.tempDir, "a.exe"))
+				cmd = append(cmd, args...)
+				out, err := runcmd(cmd...)
 				if err != nil {
 					t.err = err
 					return
@@ -620,6 +685,23 @@ func (t *test) run() {
 	}
 }
 
+var execCmd []string
+
+func findExecCmd() []string {
+	if execCmd != nil {
+		return execCmd
+	}
+	execCmd = []string{} // avoid work the second time
+	if goos == runtime.GOOS && goarch == runtime.GOARCH {
+		return execCmd
+	}
+	path, err := exec.LookPath(fmt.Sprintf("go_%s_%s_exec", goos, goarch))
+	if err == nil {
+		execCmd = []string{path}
+	}
+	return execCmd
+}	
+
 func (t *test) String() string {
 	return filepath.Join(t.dir, t.gofile)
 }
@@ -678,7 +760,7 @@ func (t *test) errorCheck(outStr string, fullshort ...string) (err error) {
 
 	for _, we := range want {
 		var errmsgs []string
-		errmsgs, out = partitionStrings(we.filterRe, out)
+		errmsgs, out = partitionStrings(we.prefix, out)
 		if len(errmsgs) == 0 {
 			errs = append(errs, fmt.Errorf("%s:%d: missing error %q", we.file, we.lineNum, we.reStr))
 			continue
@@ -720,9 +802,29 @@ func (t *test) errorCheck(outStr string, fullshort ...string) (err error) {
 
 }
 
-func partitionStrings(rx *regexp.Regexp, strs []string) (matched, unmatched []string) {
+// matchPrefix reports whether s is of the form ^(.*/)?prefix(:|[),
+// That is, it needs the file name prefix followed by a : or a [,
+// and possibly preceded by a directory name.
+func matchPrefix(s, prefix string) bool {
+	i := strings.Index(s, ":")
+	if i < 0 {
+		return false
+	}
+	j := strings.LastIndex(s[:i], "/")
+	s = s[j+1:]
+	if len(s) <= len(prefix) || s[:len(prefix)] != prefix {
+		return false
+	}
+	switch s[len(prefix)] {
+	case '[', ':':
+		return true
+	}
+	return false
+}
+
+func partitionStrings(prefix string, strs []string) (matched, unmatched []string) {
 	for _, s := range strs {
-		if rx.MatchString(s) {
+		if matchPrefix(s, prefix) {
 			matched = append(matched, s)
 		} else {
 			unmatched = append(unmatched, s)
@@ -736,7 +838,7 @@ type wantedError struct {
 	re       *regexp.Regexp
 	lineNum  int
 	file     string
-	filterRe *regexp.Regexp // /^file:linenum\b/m
+	prefix string
 }
 
 var (
@@ -746,6 +848,8 @@ var (
 )
 
 func (t *test) wantedErrors(file, short string) (errs []wantedError) {
+	cache := make(map[string]*regexp.Regexp)
+
 	src, _ := ioutil.ReadFile(file)
 	for i, line := range strings.Split(string(src), "\n") {
 		lineNum := i + 1
@@ -774,15 +878,20 @@ func (t *test) wantedErrors(file, short string) (errs []wantedError) {
 				}
 				return fmt.Sprintf("%s:%d", short, n)
 			})
-			re, err := regexp.Compile(rx)
-			if err != nil {
-				log.Fatalf("%s:%d: invalid regexp in ERROR line: %v", t.goFileName(), lineNum, err)
+			re := cache[rx]
+			if re == nil {
+				var err error
+				re, err = regexp.Compile(rx)
+				if err != nil {
+					log.Fatalf("%s:%d: invalid regexp in ERROR line: %v", t.goFileName(), lineNum, err)
+				}
+				cache[rx] = re
 			}
-			filterPattern := fmt.Sprintf(`^(\w+/)?%s:%d[:[]`, regexp.QuoteMeta(short), lineNum)
+			prefix := fmt.Sprintf("%s:%d", short, lineNum)
 			errs = append(errs, wantedError{
 				reStr:    rx,
 				re:       re,
-				filterRe: regexp.MustCompile(filterPattern),
+				prefix: prefix,
 				lineNum:  lineNum,
 				file:     short,
 			})
@@ -815,7 +924,7 @@ func defaultRunOutputLimit() int {
 	return cpu
 }
 
-// checkShouldTest runs canity checks on the shouldTest function.
+// checkShouldTest runs sanity checks on the shouldTest function.
 func checkShouldTest() {
 	assert := func(ok bool, _ string) {
 		if !ok {
@@ -823,11 +932,28 @@ func checkShouldTest() {
 		}
 	}
 	assertNot := func(ok bool, _ string) { assert(!ok, "") }
+
+	// Simple tests.
 	assert(shouldTest("// +build linux", "linux", "arm"))
 	assert(shouldTest("// +build !windows", "linux", "arm"))
 	assertNot(shouldTest("// +build !windows", "windows", "amd64"))
-	assertNot(shouldTest("// +build arm 386", "linux", "amd64"))
+
+	// A file with no build tags will always be tested.
 	assert(shouldTest("// This is a test.", "os", "arch"))
+
+	// Build tags separated by a space are OR-ed together.
+	assertNot(shouldTest("// +build arm 386", "linux", "amd64"))
+
+	// Build tags separated by a comma are AND-ed together.
+	assertNot(shouldTest("// +build !windows,!plan9", "windows", "amd64"))
+	assertNot(shouldTest("// +build !windows,!plan9", "plan9", "386"))
+
+	// Build tags on multiple lines are AND-ed together.
+	assert(shouldTest("// +build !windows\n// +build amd64", "linux", "amd64"))
+	assertNot(shouldTest("// +build !windows\n// +build amd64", "windows", "amd64"))
+
+	// Test that (!a OR !b) matches anything.
+	assert(shouldTest("// +build !windows !plan9", "windows", "amd64"))
 }
 
 // envForDir returns a copy of the environment

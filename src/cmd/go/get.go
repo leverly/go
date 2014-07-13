@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// TODO: Dashboard upload
-
 package main
 
 import (
@@ -18,7 +16,7 @@ import (
 )
 
 var cmdGet = &Command{
-	UsageLine: "get [-d] [-fix] [-u] [build flags] [packages]",
+	UsageLine: "get [-d] [-fix] [-t] [-u] [build flags] [packages]",
 	Short:     "download and install packages and dependencies",
 	Long: `
 Get downloads and installs the packages named by the import paths,
@@ -30,12 +28,14 @@ it instructs get not to install the packages.
 The -fix flag instructs get to run the fix tool on the downloaded packages
 before resolving dependencies or building the code.
 
+The -t flag instructs get to also download the packages required to build
+the tests for the specified packages.
+
 The -u flag instructs get to use the network to update the named packages
 and their dependencies.  By default, get uses the network to check out
 missing packages but does not use it to look for updates to existing packages.
 
-Get also accepts all the flags in the 'go build' and 'go install' commands,
-to control the installation. See 'go help build'.
+Get also accepts build flags to control the installation. See 'go help build'.
 
 When checking out or updating a package, get looks for a branch or tag
 that matches the locally installed version of Go. The most important
@@ -46,13 +46,14 @@ retrieves the most recent version of the package.
 For more about specifying packages, see 'go help packages'.
 
 For more about how 'go get' finds source code to
-download, see 'go help remote'.
+download, see 'go help importpath'.
 
 See also: go build, go install, go clean.
 	`,
 }
 
 var getD = cmdGet.Flag.Bool("d", false, "")
+var getT = cmdGet.Flag.Bool("t", false, "")
 var getU = cmdGet.Flag.Bool("u", false, "")
 var getFix = cmdGet.Flag.Bool("fix", false, "")
 
@@ -65,11 +66,11 @@ func runGet(cmd *Command, args []string) {
 	// Phase 1.  Download/update.
 	var stk importStack
 	for _, arg := range downloadPaths(args) {
-		download(arg, &stk)
+		download(arg, &stk, *getT)
 	}
 	exitIfErrors()
 
-	// Phase 2. Rescan packages and reevaluate args list.
+	// Phase 2. Rescan packages and re-evaluate args list.
 
 	// Code we downloaded and all code that depends on it
 	// needs to be evicted from the package cache so that
@@ -137,8 +138,12 @@ var downloadRootCache = map[string]bool{}
 
 // download runs the download half of the get command
 // for the package named by the argument.
-func download(arg string, stk *importStack) {
+func download(arg string, stk *importStack, getTestDeps bool) {
 	p := loadPackage(arg, stk)
+	if p.Error != nil && p.Error.hard {
+		errorf("%s", p.Error)
+		return
+	}
 
 	// There's nothing to do if this is a package in the standard library.
 	if p.Standard {
@@ -153,6 +158,7 @@ func download(arg string, stk *importStack) {
 
 	pkgs := []*Package{p}
 	wildcardOkay := len(*stk) == 0
+	isWildcard := false
 
 	// Download if the package is missing, or update if we're using -u.
 	if p.Dir == "" || *getU {
@@ -175,6 +181,7 @@ func download(arg string, stk *importStack) {
 			} else {
 				args = matchPackages(arg)
 			}
+			isWildcard = true
 		}
 
 		// Clear all relevant package cache entries before
@@ -214,9 +221,30 @@ func download(arg string, stk *importStack) {
 			}
 		}
 
+		if isWildcard {
+			// Report both the real package and the
+			// wildcard in any error message.
+			stk.push(p.ImportPath)
+		}
+
 		// Process dependencies, now that we know what they are.
 		for _, dep := range p.deps {
-			download(dep.ImportPath, stk)
+			// Don't get test dependencies recursively.
+			download(dep.ImportPath, stk, false)
+		}
+		if getTestDeps {
+			// Process test dependencies when -t is specified.
+			// (Don't get test dependencies for test dependencies.)
+			for _, path := range p.TestImports {
+				download(path, stk, false)
+			}
+			for _, path := range p.XTestImports {
+				download(path, stk, false)
+			}
+		}
+
+		if isWildcard {
+			stk.pop()
 		}
 	}
 }
@@ -286,7 +314,7 @@ func downloadPackage(p *Package) error {
 		}
 		// Some version control tools require the parent of the target to exist.
 		parent, _ := filepath.Split(root)
-		if err := os.MkdirAll(parent, 0777); err != nil {
+		if err = os.MkdirAll(parent, 0777); err != nil {
 			return err
 		}
 		if err = vcs.create(root, repo); err != nil {

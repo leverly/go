@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # Copyright 2009 The Go Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
@@ -27,6 +27,8 @@ my $_32bit = "";
 my $plan9 = 0;
 my $openbsd = 0;
 my $netbsd = 0;
+my $dragonfly = 0;
+my $nacl = 0;
 my $arm = 0; # 64-bit value should use (even, odd)-pair
 
 if($ARGV[0] eq "-b32") {
@@ -46,6 +48,14 @@ if($ARGV[0] eq "-openbsd") {
 }
 if($ARGV[0] eq "-netbsd") {
 	$netbsd = 1;
+	shift;
+}
+if($ARGV[0] eq "-dragonfly") {
+	$dragonfly = 1;
+	shift;
+}
+if($ARGV[0] eq "-nacl") {
+	$nacl = 1;
 	shift;
 }
 if($ARGV[0] eq "-arm") {
@@ -90,7 +100,7 @@ while(<>) {
 	# Line must be of the form
 	#	func Open(path string, mode int, perm int) (fd int, errno error)
 	# Split into name, in params, out params.
-	if(!/^\/\/sys(nb)? (\w+)\(([^()]*)\)\s*(?:\(([^()]+)\))?\s*(?:=\s*(SYS_[A-Z0-9_]+))?$/) {
+	if(!/^\/\/sys(nb)? (\w+)\(([^()]*)\)\s*(?:\(([^()]+)\))?\s*(?:=\s*((?i)SYS_[A-Z0-9_]+))?$/) {
 		print STDERR "$ARGV:$.: malformed //sys declaration\n";
 		$errors = 1;
 		next;
@@ -159,6 +169,17 @@ while(<>) {
 			} else {
 				push @args, "uintptr($name)";
 			}
+		} elsif($type eq "int64" && $dragonfly) {
+			if ($func !~ /^extp(read|write)/i) {
+				push @args, "0";
+			}
+			if($_32bit eq "big-endian") {
+				push @args, "uintptr($name>>32)", "uintptr($name)";
+			} elsif($_32bit eq "little-endian") {
+				push @args, "uintptr($name)", "uintptr($name>>32)";
+			} else {
+				push @args, "uintptr($name)";
+			}
 		} elsif($type eq "int64" && $_32bit ne "") {
 			if(@args % 2 && $arm) {
 				# arm abi specifies 64-bit argument uses 
@@ -203,6 +224,9 @@ while(<>) {
 		$sysname = "SYS_$func";
 		$sysname =~ s/([a-z])([A-Z])/${1}_$2/g;	# turn FooBar into Foo_Bar
 		$sysname =~ y/a-z/A-Z/;
+		if($nacl) {
+			$sysname =~ y/A-Z/a-z/;
+		}
 	}
 
 	# Actual call.

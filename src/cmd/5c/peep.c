@@ -31,7 +31,7 @@
 
 #include "gc.h"
 
-int xtramodes(Reg*, Adr*);
+int xtramodes(Reg*, Addr*);
 
 void
 peep(void)
@@ -127,8 +127,10 @@ loop1:
 			}
 			continue;
 		case AMOVH:
+		case AMOVHS:
 		case AMOVHU:
 		case AMOVB:
+		case AMOVBS:
 		case AMOVBU:
 			if(p->to.type != D_REG)
 				continue;
@@ -152,6 +154,7 @@ loop1:
 		switch(p->as) {
 		case AMOVW:
 		case AMOVB:
+		case AMOVBS:
 		case AMOVBU:
 			if(p->from.type == D_OREG && p->from.offset == 0)
 				xtramodes(r, &p->from);
@@ -278,7 +281,7 @@ uniqs(Reg *r)
 }
 
 int
-regtyp(Adr *a)
+regtyp(Addr *a)
 {
 
 	if(a->type == D_REG)
@@ -306,7 +309,7 @@ int
 subprop(Reg *r0)
 {
 	Prog *p;
-	Adr *v1, *v2;
+	Addr *v1, *v2;
 	Reg *r;
 	int t;
 
@@ -424,7 +427,7 @@ int
 copyprop(Reg *r0)
 {
 	Prog *p;
-	Adr *v1, *v2;
+	Addr *v1, *v2;
 	Reg *r;
 
 	p = r0->prog;
@@ -438,7 +441,7 @@ copyprop(Reg *r0)
 }
 
 int
-copy1(Adr *v1, Adr *v2, Reg *r, int f)
+copy1(Addr *v1, Addr *v2, Reg *r, int f)
 {
 	int t;
 	Prog *p;
@@ -462,7 +465,7 @@ copy1(Adr *v1, Adr *v2, Reg *r, int f)
 		}
 		t = copyu(p, v2, A);
 		switch(t) {
-		case 2:	/* rar, cant split */
+		case 2:	/* rar, can't split */
 			if(debug['P'])
 				print("; %Drar; return 0\n", v2);
 			return 0;
@@ -522,7 +525,7 @@ copy1(Adr *v1, Adr *v2, Reg *r, int f)
  * The v1->v2 should be eliminated by copy propagation.
  */
 void
-constprop(Adr *c1, Adr *v1, Reg *r)
+constprop(Addr *c1, Addr *v1, Reg *r)
 {
 	Prog *p;
 
@@ -571,7 +574,7 @@ shiftprop(Reg *r)
 	Reg *r1;
 	Prog *p, *p1, *p2;
 	int n, o;
-	Adr a;
+	Addr a;
 
 	p = r->prog;
 	if(p->to.type != D_REG)
@@ -707,7 +710,7 @@ shiftprop(Reg *r)
 }
 
 Reg*
-findpre(Reg *r, Adr *v)
+findpre(Reg *r, Addr *v)
 {
 	Reg *r1;
 
@@ -727,7 +730,7 @@ findpre(Reg *r, Adr *v)
 }
 
 Reg*
-findinc(Reg *r, Reg *r2, Adr *v)
+findinc(Reg *r, Reg *r2, Addr *v)
 {
 	Reg *r1;
 	Prog *p;
@@ -755,7 +758,7 @@ findinc(Reg *r, Reg *r2, Adr *v)
 int
 nochange(Reg *r, Reg *r2, Prog *p)
 {
-	Adr a[3];
+	Addr a[3];
 	int i, n;
 
 	if(r == r2)
@@ -785,7 +788,7 @@ nochange(Reg *r, Reg *r2, Prog *p)
 }
 
 int
-findu1(Reg *r, Adr *v)
+findu1(Reg *r, Addr *v)
 {
 	for(; r != R; r = r->s1) {
 		if(r->active)
@@ -807,7 +810,7 @@ findu1(Reg *r, Adr *v)
 }
 
 int
-finduse(Reg *r, Adr *v)
+finduse(Reg *r, Addr *v)
 {
 	Reg *r1;
 
@@ -817,14 +820,14 @@ finduse(Reg *r, Adr *v)
 }
 
 int
-xtramodes(Reg *r, Adr *a)
+xtramodes(Reg *r, Addr *a)
 {
 	Reg *r1, *r2, *r3;
 	Prog *p, *p1;
-	Adr v;
+	Addr v;
 
 	p = r->prog;
-	if(p->as == AMOVB && p->from.type == D_OREG)	/* byte load */
+	if((p->as == AMOVB || p->as == AMOVBS) && p->from.type == D_OREG)	/* byte load */
 		return 0;
 	v = *a;
 	v.type = D_REG;
@@ -836,7 +839,7 @@ xtramodes(Reg *r, Adr *a)
 		case AADD:
 			if(p1->from.type == D_REG ||
 			   (p1->from.type == D_SHIFT && (p1->from.offset&(1<<4)) == 0 &&
-			    (p->as != AMOVB || (a == &p->from && (p1->from.offset&~0xf) == 0))) ||
+			    ((p->as != AMOVB && p->as != AMOVBS) || (a == &p->from && (p1->from.offset&~0xf) == 0))) ||
 			   (p1->from.type == D_CONST &&
 			    p1->from.offset > -4096 && p1->from.offset < 4096))
 			if(nochange(uniqs(r1), r, p1)) {
@@ -908,7 +911,7 @@ xtramodes(Reg *r, Adr *a)
  * 0 otherwise (not touched)
  */
 int
-copyu(Prog *p, Adr *v, Adr *s)
+copyu(Prog *p, Addr *v, Addr *s)
 {
 
 	switch(p->as) {
@@ -961,8 +964,10 @@ copyu(Prog *p, Adr *v, Adr *s)
 	case AMOVF:
 	case AMOVD:
 	case AMOVH:
+	case AMOVHS:
 	case AMOVHU:
 	case AMOVB:
+	case AMOVBS:
 	case AMOVBU:
 	case AMOVDW:
 	case AMOVWD:
@@ -1101,7 +1106,7 @@ copyu(Prog *p, Adr *v, Adr *s)
 		if(v->type == D_REG) {
 			if(v->reg <= REGEXT && v->reg > exregoffset)
 				return 2;
-			if(v->reg == (uchar)REGARG)
+			if(v->reg == REGARG)
 				return 2;
 		}
 		if(v->type == D_FREG)
@@ -1119,7 +1124,7 @@ copyu(Prog *p, Adr *v, Adr *s)
 
 	case ATEXT:	/* funny */
 		if(v->type == D_REG)
-			if(v->reg == (uchar)REGARG)
+			if(v->reg == REGARG)
 				return 3;
 		return 0;
 	}
@@ -1170,7 +1175,7 @@ a2type(Prog *p)
  * semantics
  */
 int
-copyas(Adr *a, Adr *v)
+copyas(Addr *a, Addr *v)
 {
 
 	if(regtyp(v)) {
@@ -1192,7 +1197,7 @@ copyas(Adr *a, Adr *v)
  * either direct or indirect
  */
 int
-copyau(Adr *a, Adr *v)
+copyau(Addr *a, Addr *v)
 {
 
 	if(copyas(a, v))
@@ -1212,7 +1217,7 @@ copyau(Adr *a, Adr *v)
 }
 
 int
-copyau1(Prog *p, Adr *v)
+copyau1(Prog *p, Addr *v)
 {
 
 	if(regtyp(v)) {
@@ -1231,7 +1236,7 @@ copyau1(Prog *p, Adr *v)
  * return failure to substitute
  */
 int
-copysub(Adr *a, Adr *v, Adr *s, int f)
+copysub(Addr *a, Addr *v, Addr *s, int f)
 {
 
 	if(f)
@@ -1248,7 +1253,7 @@ copysub(Adr *a, Adr *v, Adr *s, int f)
 }
 
 int
-copysub1(Prog *p1, Adr *v, Adr *s, int f)
+copysub1(Prog *p1, Addr *v, Addr *s, int f)
 {
 
 	if(f)

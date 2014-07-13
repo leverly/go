@@ -7,13 +7,15 @@ package runtime
 #include "arch_GOARCH.h"
 #include "malloc.h"
 #include "race.h"
+#include "../../cmd/ld/textflag.h"
 
 String	runtime·emptystring;
 
-int32
+#pragma textflag NOSPLIT
+intgo
 runtime·findnull(byte *s)
 {
-	int32 l;
+	intgo l;
 
 	if(s == nil)
 		return 0;
@@ -22,10 +24,10 @@ runtime·findnull(byte *s)
 	return l;
 }
 
-int32
+intgo
 runtime·findnullw(uint16 *s)
 {
-	int32 l;
+	intgo l;
 
 	if(s == nil)
 		return 0;
@@ -34,23 +36,21 @@ runtime·findnullw(uint16 *s)
 	return l;
 }
 
-uint32 runtime·maxstring = 256; // a hint for print
+uintptr runtime·maxstring = 256; // a hint for print
 
 static String
 gostringsize(intgo l)
 {
 	String s;
-	uint32 ms;
+	uintptr ms;
 
 	if(l == 0)
 		return runtime·emptystring;
-	// leave room for NUL for C runtime (e.g., callers of getenv)
-	s.str = runtime·mallocgc(l+1, FlagNoPointers, 1, 0);
+	s.str = runtime·mallocgc(l, 0, FlagNoScan|FlagNoZero);
 	s.len = l;
-	s.str[l] = 0;
 	for(;;) {
 		ms = runtime·maxstring;
-		if((uint32)l <= ms || runtime·cas(&runtime·maxstring, ms, (uint32)l))
+		if((uintptr)l <= ms || runtime·casp((void**)&runtime·maxstring, (void*)ms, (void*)l))
 			break;
 	}
 	return s;
@@ -78,12 +78,13 @@ runtime·gostringn(byte *str, intgo l)
 	return s;
 }
 
+// used by cmd/cgo
 Slice
 runtime·gobytes(byte *p, intgo n)
 {
 	Slice sl;
 
-	sl.array = runtime·mallocgc(n, FlagNoPointers, 1, 0);
+	sl.array = runtime·mallocgc(n, 0, FlagNoScan|FlagNoZero);
 	sl.len = n;
 	sl.cap = n;
 	runtime·memmove(sl.array, p, n);
@@ -98,6 +99,10 @@ runtime·gostringnocopy(byte *str)
 	s.str = str;
 	s.len = runtime·findnull(str);
 	return s;
+}
+
+func cstringToGo(str *byte) (s String) {
+	s = runtime·gostringnocopy(str);
 }
 
 String
@@ -170,39 +175,35 @@ concatstring(intgo n, String *s)
 	return out;
 }
 
-#pragma textflag 7
-// s1 is the first of n strings.
-// the output string follows.
-func concatstring(n int, s1 String) {
-	(&s1)[n] = concatstring(n, &s1);
+#pragma textflag NOSPLIT
+func concatstring2(s1 String, s2 String) (res String) {
+	USED(&s2);
+	res = concatstring(2, &s1);
 }
-
-static int32
-cmpstring(String s1, String s2)
-{
-	uintgo i, l;
-	byte c1, c2;
-
-	l = s1.len;
-	if(s2.len < l)
-		l = s2.len;
-	for(i=0; i<l; i++) {
-		c1 = s1.str[i];
-		c2 = s2.str[i];
-		if(c1 < c2)
-			return -1;
-		if(c1 > c2)
-			return +1;
-	}
-	if(s1.len < s2.len)
-		return -1;
-	if(s1.len > s2.len)
-		return +1;
-	return 0;
+#pragma textflag NOSPLIT
+func concatstring3(s1 String, s2 String, s3 String) (res String) {
+	USED(&s2);
+	USED(&s3);
+	res = concatstring(3, &s1);
 }
-
-func cmpstring(s1 String, s2 String) (v int) {
-	v = cmpstring(s1, s2);
+#pragma textflag NOSPLIT
+func concatstring4(s1 String, s2 String, s3 String, s4 String) (res String) {
+	USED(&s2);
+	USED(&s3);
+	USED(&s4);
+	res = concatstring(4, &s1);
+}
+#pragma textflag NOSPLIT
+func concatstring5(s1 String, s2 String, s3 String, s4 String, s5 String) (res String) {
+	USED(&s2);
+	USED(&s3);
+	USED(&s4);
+	USED(&s5);
+	res = concatstring(5, &s1);
+}
+#pragma textflag NOSPLIT
+func concatstrings(s Slice) (res String) {
+	res = concatstring(s.len, (String*)s.array);
 }
 
 func eqstring(s1 String, s2 String) (v bool) {
@@ -233,6 +234,25 @@ runtime·strcmp(byte *s1, byte *s2)
 		if(c1 == 0)
 			return 0;
 	}
+}
+
+int32
+runtime·strncmp(byte *s1, byte *s2, uintptr n)
+{
+	uintptr i;
+	byte c1, c2;
+
+	for(i=0; i<n; i++) {
+		c1 = s1[i];
+		c2 = s2[i];
+		if(c1 < c2)
+			return -1;
+		if(c1 > c2)
+			return +1;
+		if(c1 == 0)
+			break;
+	}
+	return 0;
 }
 
 byte*
@@ -268,17 +288,41 @@ func slicebytetostring(b Slice) (s String) {
 
 	if(raceenabled) {
 		pc = runtime·getcallerpc(&b);
-		runtime·racereadrangepc(b.array, b.len, 1, pc, runtime·slicebytetostring);
+		runtime·racereadrangepc(b.array, b.len, pc, runtime·slicebytetostring);
 	}
 	s = gostringsize(b.len);
 	runtime·memmove(s.str, b.array, s.len);
 }
 
+func slicebytetostringtmp(b Slice) (s String) {
+	void *pc;
+
+	if(raceenabled) {
+		pc = runtime·getcallerpc(&b);
+		runtime·racereadrangepc(b.array, b.len, pc, runtime·slicebytetostringtmp);
+	}
+	
+	// Return a "string" referring to the actual []byte bytes.
+	// This is only for use by internal compiler optimizations
+	// that know that the string form will be discarded before
+	// the calling goroutine could possibly modify the original
+	// slice or synchronize with another goroutine.
+	// Today, the only such case is a m[string(k)] lookup where
+	// m is a string-keyed map and k is a []byte.
+	s.str = b.array;
+	s.len = b.len;
+}
+
 func stringtoslicebyte(s String) (b Slice) {
-	b.array = runtime·mallocgc(s.len, FlagNoPointers, 1, 0);
+	uintptr cap;
+
+	cap = runtime·roundupsize(s.len);
+	b.array = runtime·mallocgc(cap, 0, FlagNoScan|FlagNoZero);
 	b.len = s.len;
-	b.cap = s.len;
+	b.cap = cap;
 	runtime·memmove(b.array, s.str, s.len);
+	if(cap != b.len)
+		runtime·memclr(b.array+b.len, cap-b.len);
 }
 
 func slicerunetostring(b Slice) (s String) {
@@ -289,7 +333,7 @@ func slicerunetostring(b Slice) (s String) {
 
 	if(raceenabled) {
 		pc = runtime·getcallerpc(&b);
-		runtime·racereadrangepc(b.array, b.len*sizeof(*a), sizeof(*a), pc, runtime·slicerunetostring);
+		runtime·racereadrangepc(b.array, b.len*sizeof(*a), pc, runtime·slicerunetostring);
 	}
 	a = (int32*)b.array;
 	siz1 = 0;
@@ -313,6 +357,7 @@ func stringtoslicerune(s String) (b Slice) {
 	intgo n;
 	int32 dum, *r;
 	uint8 *p, *ep;
+	uintptr mem;
 
 	// two passes.
 	// unlike slicerunetostring, no race because strings are immutable.
@@ -324,13 +369,18 @@ func stringtoslicerune(s String) (b Slice) {
 		n++;
 	}
 
-	b.array = runtime·mallocgc(n*sizeof(r[0]), FlagNoPointers, 1, 0);
+	if(n > MaxMem/sizeof(r[0]))
+		runtime·throw("out of memory");
+	mem = runtime·roundupsize(n*sizeof(r[0]));
+	b.array = runtime·mallocgc(mem, 0, FlagNoScan|FlagNoZero);
 	b.len = n;
-	b.cap = n;
+	b.cap = mem/sizeof(r[0]);
 	p = s.str;
 	r = (int32*)b.array;
 	while(p < ep)
 		p += runtime·charntorune(r++, p, ep-p);
+	if(b.cap > b.len)
+		runtime·memclr(b.array+b.len*sizeof(r[0]), (b.cap-b.len)*sizeof(r[0]));
 }
 
 enum

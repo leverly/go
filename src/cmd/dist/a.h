@@ -74,10 +74,14 @@ extern char *goroot;
 extern char *goroot_final;
 extern char *goextlinkenabled;
 extern char *goversion;
+extern char *defaultcc;
+extern char *defaultcxxtarget;
+extern char *defaultcctarget;
 extern char *workdir;
 extern char *tooldir;
 extern char *slash;
 extern bool rebuildall;
+extern bool defaultclang;
 
 int	find(char*, char**, int);
 void	init(void);
@@ -90,20 +94,26 @@ void	cmdversion(int, char**);
 
 // buildgc.c
 void	gcopnames(char*, char*);
-void	mkenam(char*, char*);
+void	mkanames(char*, char*);
 
 // buildruntime.c
 void	mkzasm(char*, char*);
+void	mkzsys(char*, char*);
 void	mkzgoarch(char*, char*);
 void	mkzgoos(char*, char*);
 void	mkzruntimedefs(char*, char*);
 void	mkzversion(char*, char*);
+void	mkzexperiment(char*, char*);
+
+// buildgo.c
+void	mkzdefaultcc(char*, char*);
 
 // goc2c.c
 void	goc2c(char*, char*);
 
 // main.c
 extern int vflag;
+extern int sflag;
 void	usage(void);
 void	xmain(int argc, char **argv);
 

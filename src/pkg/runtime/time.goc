@@ -13,13 +13,26 @@ package time
 #include "malloc.h"
 #include "race.h"
 
+enum {
+	debug = 0,
+};
+
 static Timers timers;
 static void addtimer(Timer*);
+static void dumptimers(int8*);
+
+// nacl fake time support. 
+int64 runtime·timens;
 
 // Package time APIs.
 // Godoc uses the comments in package time, not these.
 
 // time.now is implemented in assembly.
+
+// runtimeNano returns the current value of the runtime clock in nanoseconds.
+func runtimeNano() (ns int64) {
+	ns = runtime·nanotime();
+}
 
 // Sleep puts the current goroutine to sleep for at least ns nanoseconds.
 func Sleep(ns int64) {
@@ -40,6 +53,16 @@ func stopTimer(t *Timer) (stopped bool) {
 }
 
 // C runtime.
+
+void runtime·gc_unixnanotime(int64 *now);
+
+int64 runtime·unixnanotime(void)
+{
+	int64 now;
+
+	runtime·gc_unixnanotime(&now);
+	return now;
+}
 
 static void timerproc(void);
 static void siftup(int32);
@@ -71,7 +94,7 @@ runtime·tsleep(int64 ns, int8 *reason)
 	t.arg.data = g;
 	runtime·lock(&timers);
 	addtimer(&t);
-	runtime·park(runtime·unlock, &timers, reason);
+	runtime·parkunlock(&timers, reason);
 }
 
 static FuncVal timerprocv = {timerproc};
@@ -91,6 +114,11 @@ addtimer(Timer *t)
 {
 	int32 n;
 	Timer **nt;
+
+	// when must never be negative; otherwise timerproc will overflow
+	// during its delta calculation and never expire other timers.
+	if(t->when < 0)
+		t->when = (1LL<<63)-1;
 
 	if(timers.len >= timers.cap) {
 		// Grow slice.
@@ -121,6 +149,8 @@ addtimer(Timer *t)
 		timers.timerproc = runtime·newproc1(&timerprocv, nil, 0, 0, addtimer);
 		timers.timerproc->issystem = true;
 	}
+	if(debug)
+		dumptimers("addtimer");
 }
 
 // Delete timer t from the heap.
@@ -130,6 +160,11 @@ bool
 runtime·deltimer(Timer *t)
 {
 	int32 i;
+
+	// Dereference t so that any panic happens before the lock is held.
+	// Discard result, because t might be moving in the heap.
+	i = t->i;
+	USED(i);
 
 	runtime·lock(&timers);
 
@@ -152,6 +187,8 @@ runtime·deltimer(Timer *t)
 		siftup(i);
 		siftdown(i);
 	}
+	if(debug)
+		dumptimers("deltimer");
 	runtime·unlock(&timers);
 	return true;
 }
@@ -170,6 +207,7 @@ timerproc(void)
 
 	for(;;) {
 		runtime·lock(&timers);
+		timers.sleeping = false;
 		now = runtime·nanotime();
 		for(;;) {
 			if(timers.len == 0) {
@@ -197,21 +235,29 @@ timerproc(void)
 			if(raceenabled)
 				runtime·raceacquire(t);
 			f(now, arg);
+
+			// clear f and arg to avoid leak while sleeping for next timer
+			f = nil;
+			USED(f);
+			arg.type = nil;
+			arg.data = nil;
+			USED(&arg);
+
 			runtime·lock(&timers);
 		}
 		if(delta < 0) {
 			// No timers left - put goroutine to sleep.
 			timers.rescheduling = true;
-			runtime·park(runtime·unlock, &timers, "timer goroutine (idle)");
+			g->isbackground = true;
+			runtime·parkunlock(&timers, "timer goroutine (idle)");
+			g->isbackground = false;
 			continue;
 		}
 		// At least one timer pending.  Sleep until then.
 		timers.sleeping = true;
 		runtime·noteclear(&timers.waitnote);
 		runtime·unlock(&timers);
-		runtime·entersyscallblock();
-		runtime·notetsleep(&timers.waitnote, delta);
-		runtime·exitsyscall();
+		runtime·notetsleepg(&timers.waitnote, delta);
 	}
 }
 
@@ -221,18 +267,20 @@ static void
 siftup(int32 i)
 {
 	int32 p;
+	int64 when;
 	Timer **t, *tmp;
 
 	t = timers.t;
+	when = t[i]->when;
+	tmp = t[i];
 	while(i > 0) {
-		p = (i-1)/2;  // parent
-		if(t[i]->when >= t[p]->when)
+		p = (i-1)/4;  // parent
+		if(when >= t[p]->when)
 			break;
-		tmp = t[i];
 		t[i] = t[p];
-		t[p] = tmp;
 		t[i]->i = i;
-		t[p]->i = p;
+		t[p] = tmp;
+		tmp->i = p;
 		i = p;
 	}
 }
@@ -240,25 +288,57 @@ siftup(int32 i)
 static void
 siftdown(int32 i)
 {
-	int32 c, len;
+	int32 c, c3, len;
+	int64 when, w, w3;
 	Timer **t, *tmp;
 
 	t = timers.t;
 	len = timers.len;
+	when = t[i]->when;
+	tmp = t[i];
 	for(;;) {
-		c = i*2 + 1;  // left child
+		c = i*4 + 1;  // left child
+		c3 = c + 2;  // mid child
 		if(c >= len) {
 			break;
 		}
-		if(c+1 < len && t[c+1]->when < t[c]->when)
+		w = t[c]->when;
+		if(c+1 < len && t[c+1]->when < w) {
+			w = t[c+1]->when;
 			c++;
-		if(t[c]->when >= t[i]->when)
+		}
+		if(c3 < len) {
+			w3 = t[c3]->when;
+			if(c3+1 < len && t[c3+1]->when < w3) {
+				w3 = t[c3+1]->when;
+				c3++;
+			}
+			if(w3 < w) {
+				w = w3;
+				c = c3;
+			}
+		}
+		if(w >= when)
 			break;
-		tmp = t[i];
 		t[i] = t[c];
-		t[c] = tmp;
 		t[i]->i = i;
-		t[c]->i = c;
+		t[c] = tmp;
+		tmp->i = c;
 		i = c;
 	}
+}
+
+static void
+dumptimers(int8 *msg)
+{
+	Timer *t;
+	int32 i;
+
+	runtime·printf("timers: %s\n", msg);
+	for(i = 0; i < timers.len; i++) {
+		t = timers.t[i];
+		runtime·printf("\t%d\t%p:\ti %d when %D period %D fn %p\n",
+				i, t, t->i, t->when, t->period, t->fv->fn);
+	}
+	runtime·printf("\n");
 }

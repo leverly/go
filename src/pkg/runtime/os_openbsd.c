@@ -7,6 +7,7 @@
 #include "os_GOOS.h"
 #include "signal_unix.h"
 #include "stack.h"
+#include "../../cmd/ld/textflag.h"
 
 enum
 {
@@ -59,11 +60,11 @@ runtime·semacreate(void)
 	return 1;
 }
 
+#pragma textflag NOSPLIT
 int32
 runtime·semasleep(int64 ns)
 {
 	Timespec ts;
-	int64 secs;
 
 	// spin-mutex lock
 	while(runtime·xchg(&m->waitsemalock, 1))
@@ -78,13 +79,10 @@ runtime·semasleep(int64 ns)
 				runtime·thrsleep(&m->waitsemacount, 0, nil, &m->waitsemalock, nil);
 			else {
 				ns += runtime·nanotime();
-				secs = ns/1000000000LL;
-				// Avoid overflow
-				if(secs >= 1LL<<31)
-					secs = (1LL<<31) - 1;
-				ts.tv_sec = secs;
-				ts.tv_nsec = ns%1000000000LL;
-				runtime·thrsleep(&m->waitsemacount, CLOCK_REALTIME, &ts, &m->waitsemalock, nil);
+				// NOTE: tv_nsec is int64 on amd64, so this assumes a little-endian system.
+				ts.tv_nsec = 0;
+				ts.tv_sec = runtime·timediv(ns, 1000000000, (int32*)&ts.tv_nsec);
+				runtime·thrsleep(&m->waitsemacount, CLOCK_MONOTONIC, &ts, &m->waitsemalock, nil);
 			}
 			// reacquire lock
 			while(runtime·xchg(&m->waitsemalock, 1))
@@ -169,6 +167,7 @@ runtime·osinit(void)
 void
 runtime·get_random_data(byte **rnd, int32 *rnd_len)
 {
+	#pragma dataflag NOPTR
 	static byte urandom_data[HashRandomBytes];
 	int32 fd;
 	fd = runtime·open("/dev/urandom", 0 /* O_RDONLY */, 0);
@@ -216,9 +215,12 @@ runtime·unminit(void)
 void
 runtime·sigpanic(void)
 {
+	if(!runtime·canpanic(g))
+		runtime·throw("unexpected signal during runtime execution");
+
 	switch(g->sig) {
 	case SIGBUS:
-		if(g->sigcode0 == BUS_ADRERR && g->sigcode1 < 0x1000) {
+		if(g->sigcode0 == BUS_ADRERR && g->sigcode1 < 0x1000 || g->paniconfault) {
 			if(g->sigpc == 0)
 				runtime·panicstring("call of nil func value");
 			runtime·panicstring("invalid memory address or nil pointer dereference");
@@ -226,7 +228,7 @@ runtime·sigpanic(void)
 		runtime·printf("unexpected fault address %p\n", g->sigcode1);
 		runtime·throw("fault");
 	case SIGSEGV:
-		if((g->sigcode0 == 0 || g->sigcode0 == SEGV_MAPERR || g->sigcode0 == SEGV_ACCERR) && g->sigcode1 < 0x1000) {
+		if((g->sigcode0 == 0 || g->sigcode0 == SEGV_MAPERR || g->sigcode0 == SEGV_ACCERR) && g->sigcode1 < 0x1000 || g->paniconfault) {
 			if(g->sigpc == 0)
 				runtime·panicstring("call of nil func value");
 			runtime·panicstring("invalid memory address or nil pointer dereference");
@@ -249,45 +251,6 @@ uintptr
 runtime·memlimit(void)
 {
 	return 0;
-}
-
-void
-runtime·setprof(bool on)
-{
-	USED(on);
-}
-
-static int8 badcallback[] = "runtime: cgo callback on thread not created by Go.\n";
-
-// This runs on a foreign stack, without an m or a g.  No stack split.
-#pragma textflag 7
-void
-runtime·badcallback(void)
-{
-	runtime·write(2, badcallback, sizeof badcallback - 1);
-}
-
-static int8 badsignal[] = "runtime: signal received on thread not created by Go: ";
-
-// This runs on a foreign stack, without an m or a g.  No stack split.
-#pragma textflag 7
-void
-runtime·badsignal(int32 sig)
-{
-	int32 len;
-
-	if (sig == SIGPROF) {
-		return;  // Ignore SIGPROFs intended for a non-Go thread.
-	}
-	runtime·write(2, badsignal, sizeof badsignal - 1);
-	if (0 <= sig && sig < NSIG) {
-		// Can't call findnull() because it will split stack.
-		for(len = 0; runtime·sigtab[sig].name[len]; len++)
-			;
-		runtime·write(2, runtime·sigtab[sig].name, len);
-	}
-	runtime·write(2, "\n", 1);
-	runtime·exit(1);
 }
 
 extern void runtime·sigtramp(void);
@@ -340,4 +303,10 @@ runtime·signalstack(byte *p, int32 n)
 	if(p == nil)
 		st.ss_flags = SS_DISABLE;
 	runtime·sigaltstack(&st, nil);
+}
+
+void
+runtime·unblocksignals(void)
+{
+	runtime·sigprocmask(SIG_SETMASK, sigset_none);
 }

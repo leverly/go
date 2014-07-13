@@ -101,6 +101,225 @@ lsort(Sig *l, int(*f)(Sig*, Sig*))
 	return l;
 }
 
+// Builds a type respresenting a Bucket structure for
+// the given map type.  This type is not visible to users -
+// we include only enough information to generate a correct GC
+// program for it.
+// Make sure this stays in sync with ../../pkg/runtime/hashmap.c!
+enum {
+	BUCKETSIZE = 8,
+	MAXKEYSIZE = 128,
+	MAXVALSIZE = 128,
+};
+
+static Type*
+mapbucket(Type *t)
+{
+	Type *keytype, *valtype;
+	Type *bucket;
+	Type *overflowfield, *keysfield, *valuesfield;
+	int32 offset;
+
+	if(t->bucket != T)
+		return t->bucket;
+
+	keytype = t->down;
+	valtype = t->type;
+	dowidth(keytype);
+	dowidth(valtype);
+	if(keytype->width > MAXKEYSIZE)
+		keytype = ptrto(keytype);
+	if(valtype->width > MAXVALSIZE)
+		valtype = ptrto(valtype);
+
+	bucket = typ(TSTRUCT);
+	bucket->noalg = 1;
+
+	// The first field is: uint8 topbits[BUCKETSIZE].
+	// We don't need to encode it as GC doesn't care about it.
+	offset = BUCKETSIZE * 1;
+
+	overflowfield = typ(TFIELD);
+	overflowfield->type = ptrto(bucket);
+	overflowfield->width = offset;         // "width" is offset in structure
+	overflowfield->sym = mal(sizeof(Sym)); // not important but needs to be set to give this type a name
+	overflowfield->sym->name = "overflow";
+	offset += widthptr;
+	
+	// The keys are padded to the native integer alignment.
+	// This is usually the same as widthptr; the exception (as usual) is nacl/amd64.
+	if(widthreg > widthptr)
+		offset += widthreg - widthptr;
+
+	keysfield = typ(TFIELD);
+	keysfield->type = typ(TARRAY);
+	keysfield->type->type = keytype;
+	keysfield->type->bound = BUCKETSIZE;
+	keysfield->type->width = BUCKETSIZE * keytype->width;
+	keysfield->width = offset;
+	keysfield->sym = mal(sizeof(Sym));
+	keysfield->sym->name = "keys";
+	offset += BUCKETSIZE * keytype->width;
+
+	valuesfield = typ(TFIELD);
+	valuesfield->type = typ(TARRAY);
+	valuesfield->type->type = valtype;
+	valuesfield->type->bound = BUCKETSIZE;
+	valuesfield->type->width = BUCKETSIZE * valtype->width;
+	valuesfield->width = offset;
+	valuesfield->sym = mal(sizeof(Sym));
+	valuesfield->sym->name = "values";
+	offset += BUCKETSIZE * valtype->width;
+
+	// link up fields
+	bucket->type = overflowfield;
+	overflowfield->down = keysfield;
+	keysfield->down = valuesfield;
+	valuesfield->down = T;
+
+	bucket->width = offset;
+	bucket->local = t->local;
+	t->bucket = bucket;
+	bucket->map = t;
+	return bucket;
+}
+
+// Builds a type respresenting a Hmap structure for
+// the given map type.  This type is not visible to users -
+// we include only enough information to generate a correct GC
+// program for it.
+// Make sure this stays in sync with ../../pkg/runtime/hashmap.c!
+static Type*
+hmap(Type *t)
+{
+	Type *h, *bucket;
+	Type *bucketsfield, *oldbucketsfield;
+	int32 offset;
+
+	if(t->hmap != T)
+		return t->hmap;
+
+	bucket = mapbucket(t);
+	h = typ(TSTRUCT);
+	h->noalg = 1;
+
+	offset = widthint; // count
+	offset += 4;       // flags
+	offset += 4;       // hash0
+	offset += 1;       // B
+	offset += 1;       // keysize
+	offset += 1;       // valuesize
+	offset = (offset + 1) / 2 * 2;
+	offset += 2;       // bucketsize
+	offset = (offset + widthptr - 1) / widthptr * widthptr;
+	
+	bucketsfield = typ(TFIELD);
+	bucketsfield->type = ptrto(bucket);
+	bucketsfield->width = offset;
+	bucketsfield->sym = mal(sizeof(Sym));
+	bucketsfield->sym->name = "buckets";
+	offset += widthptr;
+
+	oldbucketsfield = typ(TFIELD);
+	oldbucketsfield->type = ptrto(bucket);
+	oldbucketsfield->width = offset;
+	oldbucketsfield->sym = mal(sizeof(Sym));
+	oldbucketsfield->sym->name = "oldbuckets";
+	offset += widthptr;
+
+	offset += widthptr; // nevacuate (last field in Hmap)
+
+	// link up fields
+	h->type = bucketsfield;
+	bucketsfield->down = oldbucketsfield;
+	oldbucketsfield->down = T;
+
+	h->width = offset;
+	h->local = t->local;
+	t->hmap = h;
+	h->map = t;
+	return h;
+}
+
+Type*
+hiter(Type *t)
+{
+	int32 n, off;
+	Type *field[7];
+	Type *i;
+
+	if(t->hiter != T)
+		return t->hiter;
+
+	// build a struct:
+	// hash_iter {
+	//    key *Key
+	//    val *Value
+	//    t *MapType
+	//    h *Hmap
+	//    buckets *Bucket
+	//    bptr *Bucket
+	//    other [4]uintptr
+	// }
+	// must match ../../pkg/runtime/hashmap.c:hash_iter.
+	field[0] = typ(TFIELD);
+	field[0]->type = ptrto(t->down);
+	field[0]->sym = mal(sizeof(Sym));
+	field[0]->sym->name = "key";
+	
+	field[1] = typ(TFIELD);
+	field[1]->type = ptrto(t->type);
+	field[1]->sym = mal(sizeof(Sym));
+	field[1]->sym->name = "val";
+	
+	field[2] = typ(TFIELD);
+	field[2]->type = ptrto(types[TUINT8]); // TODO: is there a Type type?
+	field[2]->sym = mal(sizeof(Sym));
+	field[2]->sym->name = "t";
+	
+	field[3] = typ(TFIELD);
+	field[3]->type = ptrto(hmap(t));
+	field[3]->sym = mal(sizeof(Sym));
+	field[3]->sym->name = "h";
+	
+	field[4] = typ(TFIELD);
+	field[4]->type = ptrto(mapbucket(t));
+	field[4]->sym = mal(sizeof(Sym));
+	field[4]->sym->name = "buckets";
+	
+	field[5] = typ(TFIELD);
+	field[5]->type = ptrto(mapbucket(t));
+	field[5]->sym = mal(sizeof(Sym));
+	field[5]->sym->name = "bptr";
+	
+	// all other non-pointer fields
+	field[6] = typ(TFIELD);
+	field[6]->type = typ(TARRAY);
+	field[6]->type->type = types[TUINTPTR];
+	field[6]->type->bound = 4;
+	field[6]->type->width = 4 * widthptr;
+	field[6]->sym = mal(sizeof(Sym));
+	field[6]->sym->name = "other";
+	
+	// build iterator struct holding the above fields
+	i = typ(TSTRUCT);
+	i->noalg = 1;
+	i->type = field[0];
+	off = 0;
+	for(n = 0; n < 6; n++) {
+		field[n]->down = field[n+1];
+		field[n]->width = off;
+		off += field[n]->type->width;
+	}
+	field[6]->down = T;
+	off += field[6]->type->width;
+	if(off != 10 * widthptr)
+		yyerror("hash_iter size not correct %d %d", off, 10 * widthptr);
+	t->hiter = i;
+	i->map = t;
+	return i;
+}
+
 /*
  * f is method type, with receiver.
  * return function type, receiver as first argument (or not).
@@ -208,16 +427,8 @@ methods(Type *t)
 		if(!(a->isym->flags & SymSiggen)) {
 			a->isym->flags |= SymSiggen;
 			if(!eqtype(this, it) || this->width < types[tptr]->width) {
-				// Is okay to call genwrapper here always,
-				// but we can generate more efficient code
-				// using genembedtramp if all that is necessary
-				// is a pointer adjustment and a JMP.
 				compiling_wrappers = 1;
-				if(isptr[it->etype] && isptr[this->etype]
-				&& f->embedded && !isifacemethod(f->type))
-					genembedtramp(it, f, a->isym, 1);
-				else
-					genwrapper(it, f, a->isym, 1);
+				genwrapper(it, f, a->isym, 1);
 				compiling_wrappers = 0;
 			}
 		}
@@ -226,11 +437,7 @@ methods(Type *t)
 			a->tsym->flags |= SymSiggen;
 			if(!eqtype(this, t)) {
 				compiling_wrappers = 1;
-				if(isptr[t->etype] && isptr[this->etype]
-				&& f->embedded && !isifacemethod(f->type))
-					genembedtramp(t, f, a->tsym, 0);
-				else
-					genwrapper(t, f, a->tsym, 0);
+				genwrapper(t, f, a->tsym, 0);
 				compiling_wrappers = 0;
 			}
 		}
@@ -276,9 +483,8 @@ imethods(Type *t)
 			last->link = a;
 		last = a;
 
-		// Compiler can only refer to wrappers for
-		// named interface types.
-		if(t->sym == S)
+		// Compiler can only refer to wrappers for non-blank methods.
+		if(isblanksym(method))
 			continue;
 
 		// NOTE(rsc): Perhaps an oversight that
@@ -471,6 +677,10 @@ int
 haspointers(Type *t)
 {
 	Type *t1;
+	int ret;
+
+	if(t->haspointers != 0)
+		return t->haspointers - 1;
 
 	switch(t->etype) {
 	case TINT:
@@ -486,17 +696,31 @@ haspointers(Type *t)
 	case TUINTPTR:
 	case TFLOAT32:
 	case TFLOAT64:
+	case TCOMPLEX64:
+	case TCOMPLEX128:
 	case TBOOL:
-		return 0;
+		ret = 0;
+		break;
 	case TARRAY:
-		if(t->bound < 0)	// slice
-			return 1;
-		return haspointers(t->type);
+		if(t->bound < 0) {	// slice
+			ret = 1;
+			break;
+		}
+		if(t->bound == 0) {	// empty array
+			ret = 0;
+			break;
+		}
+		ret = haspointers(t->type);
+		break;
 	case TSTRUCT:
-		for(t1=t->type; t1!=T; t1=t1->down)
-			if(haspointers(t1->type))
-				return 1;
-		return 0;
+		ret = 0;
+		for(t1=t->type; t1!=T; t1=t1->down) {
+			if(haspointers(t1->type)) {
+				ret = 1;
+				break;
+			}
+		}
+		break;
 	case TSTRING:
 	case TPTR32:
 	case TPTR64:
@@ -506,8 +730,12 @@ haspointers(Type *t)
 	case TMAP:
 	case TFUNC:
 	default:
-		return 1;
+		ret = 1;
+		break;
 	}
+	
+	t->haspointers = 1+ret;
+	return ret;
 }
 
 /*
@@ -518,7 +746,7 @@ static int
 dcommontype(Sym *s, int ot, Type *t)
 {
 	int i, alg, sizeofAlg;
-	Sym *sptr, *algsym;
+	Sym *sptr, *algsym, *zero;
 	static Sym *algarray;
 	char *p;
 	
@@ -539,6 +767,18 @@ dcommontype(Sym *s, int ot, Type *t)
 	else
 		sptr = weaktypesym(ptrto(t));
 
+	// All (non-reflect-allocated) Types share the same zero object.
+	// Each place in the compiler where a pointer to the zero object
+	// might be returned by a runtime call (map access return value,
+	// 2-arg type cast) declares the size of the zerovalue it needs.
+	// The linker magically takes the max of all the sizes.
+	zero = pkglookup("zerovalue", runtimepkg);
+
+	// We use size 0 here so we get the pointer to the zero value,
+	// but don't allocate space for the zero value unless we need it.
+	// TODO: how do we get this symbol into bss?  We really want
+	// a read-only bss, but I don't think such a thing exists.
+
 	// ../../pkg/reflect/type.go:/^type.commonType
 	// actual type structure
 	//	type commonType struct {
@@ -553,6 +793,7 @@ dcommontype(Sym *s, int ot, Type *t)
 	//		string        *string
 	//		*extraType
 	//		ptrToThis     *Type
+	//		zero          unsafe.Pointer
 	//	}
 	ot = duintptr(s, ot, t->width);
 	ot = duint32(s, ot, typehash(t));
@@ -590,6 +831,7 @@ dcommontype(Sym *s, int ot, Type *t)
 	ot += widthptr;
 
 	ot = dsymptr(s, ot, sptr, 0);  // ptrto type
+	ot = dsymptr(s, ot, zero, 0);  // ptr to zero value
 	return ot;
 }
 
@@ -709,7 +951,7 @@ static Sym*
 dtypesym(Type *t)
 {
 	int ot, xt, n, isddd, dupok;
-	Sym *s, *s1, *s2, *slink;
+	Sym *s, *s1, *s2, *s3, *s4, *slink;
 	Sig *a, *m;
 	Type *t1, *tbase, *t2;
 
@@ -755,7 +997,7 @@ ok:
 	switch(t->etype) {
 	default:
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		break;
 
 	case TARRAY:
@@ -767,7 +1009,7 @@ ok:
 			t2->bound = -1;  // slice
 			s2 = dtypesym(t2);
 			ot = dcommontype(s, ot, t);
-			xt = ot - 2*widthptr;
+			xt = ot - 3*widthptr;
 			ot = dsymptr(s, ot, s1, 0);
 			ot = dsymptr(s, ot, s2, 0);
 			ot = duintptr(s, ot, t->bound);
@@ -775,7 +1017,7 @@ ok:
 			// ../../pkg/runtime/type.go:/SliceType
 			s1 = dtypesym(t->type);
 			ot = dcommontype(s, ot, t);
-			xt = ot - 2*widthptr;
+			xt = ot - 3*widthptr;
 			ot = dsymptr(s, ot, s1, 0);
 		}
 		break;
@@ -784,7 +1026,7 @@ ok:
 		// ../../pkg/runtime/type.go:/ChanType
 		s1 = dtypesym(t->type);
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = dsymptr(s, ot, s1, 0);
 		ot = duintptr(s, ot, t->chan);
 		break;
@@ -801,7 +1043,7 @@ ok:
 			dtypesym(t1->type);
 
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = duint8(s, ot, isddd);
 
 		// two slice headers: in and out.
@@ -833,7 +1075,7 @@ ok:
 
 		// ../../pkg/runtime/type.go:/InterfaceType
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = dsymptr(s, ot, s, ot+widthptr+2*widthint);
 		ot = duintxx(s, ot, n, widthint);
 		ot = duintxx(s, ot, n, widthint);
@@ -849,10 +1091,14 @@ ok:
 		// ../../pkg/runtime/type.go:/MapType
 		s1 = dtypesym(t->down);
 		s2 = dtypesym(t->type);
+		s3 = dtypesym(mapbucket(t));
+		s4 = dtypesym(hmap(t));
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = dsymptr(s, ot, s1, 0);
 		ot = dsymptr(s, ot, s2, 0);
+		ot = dsymptr(s, ot, s3, 0);
+		ot = dsymptr(s, ot, s4, 0);
 		break;
 
 	case TPTR32:
@@ -865,7 +1111,7 @@ ok:
 		// ../../pkg/runtime/type.go:/PtrType
 		s1 = dtypesym(t->type);
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = dsymptr(s, ot, s1, 0);
 		break;
 
@@ -878,7 +1124,7 @@ ok:
 			n++;
 		}
 		ot = dcommontype(s, ot, t);
-		xt = ot - 2*widthptr;
+		xt = ot - 3*widthptr;
 		ot = dsymptr(s, ot, s, ot+widthptr+2*widthint);
 		ot = duintxx(s, ot, n, widthint);
 		ot = duintxx(s, ot, n, widthint);
@@ -1026,7 +1272,8 @@ dalgsym(Type *t)
 }
 
 static int
-gcinline(Type *t) {
+gcinline(Type *t)
+{
 	switch(t->etype) {
 	case TARRAY:
 		if(t->bound == 1)
@@ -1075,7 +1322,22 @@ dgcsym1(Sym *s, int ot, Type *t, vlong *off, int stack_size)
 		// NOTE: Any changes here need to be made to reflect.PtrTo as well.
 		if(*off % widthptr != 0)
 			fatal("dgcsym1: invalid alignment, %T", t);
-		if(!haspointers(t->type) || t->type->etype == TUINT8) {
+
+		// NOTE(rsc): Emitting GC_APTR here for *nonptrtype
+		// (pointer to non-pointer-containing type) means that
+		// we do not record 'nonptrtype' and instead tell the 
+		// garbage collector to look up the type of the memory in
+		// type information stored in the heap. In effect we are telling
+		// the collector "we don't trust our information - use yours".
+		// It's not completely clear why we want to do this.
+		// It does have the effect that if you have a *SliceHeader and a *[]int
+		// pointing at the same actual slice header, *SliceHeader will not be
+		// used as an authoritative type for the memory, which is good:
+		// if the collector scanned the memory as type *SliceHeader, it would
+		// see no pointers inside but mark the block as scanned, preventing
+		// the seeing of pointers when we followed the *[]int pointer.
+		// Perhaps that kind of situation is the rationale.
+		if(!haspointers(t->type)) {
 			ot = duintptr(s, ot, GC_APTR);
 			ot = duintptr(s, ot, *off);
 		} else {
@@ -1111,9 +1373,9 @@ dgcsym1(Sym *s, int ot, Type *t, vlong *off, int stack_size)
 		// NOTE: Any changes here need to be made to reflect.MapOf as well.
 		if(*off % widthptr != 0)
 			fatal("dgcsym1: invalid alignment, %T", t);
-		ot = duintptr(s, ot, GC_MAP_PTR);
+		ot = duintptr(s, ot, GC_PTR);
 		ot = duintptr(s, ot, *off);
-		ot = dsymptr(s, ot, dtypesym(t), 0);
+		ot = dsymptr(s, ot, dgcsym(hmap(t)), 0);
 		*off += t->width;
 		break;
 

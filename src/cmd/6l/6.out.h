@@ -30,11 +30,7 @@
 
 #define	NSYM	50
 #define	NSNAME	8
-#define NOPROF	(1<<0)
-#define DUPOK	(1<<1)
-#define NOSPLIT	(1<<2)
-#define RODATA	(1<<3)
-#define NOPTR	(1<<4)
+#include "../ld/textflag.h"
 
 /*
  *	amd64
@@ -759,11 +755,18 @@ enum	as
 	AAESKEYGENASSIST,
 
 	APSHUFD,
+	APCLMULQDQ,
 	
 	AUSEFIELD,
-	ALOCALS,
 	ATYPE,
-
+	AFUNCDATA,
+	APCDATA,
+	ACHECKNIL,
+	AVARDEF,
+	AVARKILL,
+	ADUFFCOPY,
+	ADUFFZERO,
+	
 	ALAST
 };
 
@@ -847,26 +850,20 @@ enum
 	D_DR		= 95,
 	D_TR		= 103,
 
-	D_NONE		= 111,
+	D_TLS		= 111,
+	D_NONE		= 112,
 
-	D_BRANCH	= 112,
-	D_EXTERN	= 113,
-	D_STATIC	= 114,
-	D_AUTO		= 115,
-	D_PARAM		= 116,
-	D_CONST		= 117,
-	D_FCONST	= 118,
-	D_SCONST	= 119,
-	D_ADDR		= 120,
-
-	D_FILE,
-	D_FILE1,
+	D_BRANCH	= 113,
+	D_EXTERN	= 114,
+	D_STATIC	= 115,
+	D_AUTO		= 116,
+	D_PARAM		= 117,
+	D_CONST		= 118,
+	D_FCONST	= 119,
+	D_SCONST	= 120,
+	D_ADDR		= 121,
 
 	D_INDIR,	/* additive */
-
-	D_SIZE = D_INDIR + D_INDIR,	/* 6l internal */
-	D_PCREL,
-	D_TLS,
 
 	T_TYPE		= 1<<0,
 	T_INDEX		= 1<<1,
@@ -891,15 +888,3 @@ enum
  * this is the ranlib header
  */
 #define	SYMDEF	"__.GOSYMDEF"
-
-/*
- * this is the simulated IEEE floating point
- */
-typedef	struct	ieee	Ieee;
-struct	ieee
-{
-	int32	l;	/* contains ls-man	0xffffffff */
-	int32	h;	/* contains sign	0x80000000
-				    exp		0x7ff00000
-				    ms-man	0x000fffff */
-};

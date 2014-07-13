@@ -15,9 +15,8 @@ typedef struct Method Method;
 typedef struct IMethod IMethod;
 typedef struct SliceType SliceType;
 typedef struct FuncType FuncType;
-typedef struct PtrType PtrType;
 
-// Needs to be in sync with typekind.h/CommonSize
+// Needs to be in sync with ../../cmd/ld/decodesym.c:/^commonsize
 struct Type
 {
 	uintptr size;
@@ -31,6 +30,7 @@ struct Type
 	String *string;
 	UncommonType *x;
 	Type *ptrto;
+	byte *zero;  // ptr to the zero value for this type
 };
 
 struct Method
@@ -70,6 +70,8 @@ struct MapType
 	Type;
 	Type *key;
 	Type *elem;
+	Type *bucket; // internal type representing a hash bucket
+	Type *hmap;   // internal type representing a Hmap
 };
 
 struct ChanType

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func TestGcSys(t *testing.T) {
@@ -95,5 +96,141 @@ func TestGcHashmapIndirection(t *testing.T) {
 		var a T
 		a.a[0] = i
 		m[a] = T{}
+	}
+}
+
+func TestGcArraySlice(t *testing.T) {
+	type X struct {
+		buf     [1]byte
+		nextbuf []byte
+		next    *X
+	}
+	var head *X
+	for i := 0; i < 10; i++ {
+		p := &X{}
+		p.buf[0] = 42
+		p.next = head
+		if head != nil {
+			p.nextbuf = head.buf[:]
+		}
+		head = p
+		runtime.GC()
+	}
+	for p := head; p != nil; p = p.next {
+		if p.buf[0] != 42 {
+			t.Fatal("corrupted heap")
+		}
+	}
+}
+
+func TestGcRescan(t *testing.T) {
+	type X struct {
+		c     chan error
+		nextx *X
+	}
+	type Y struct {
+		X
+		nexty *Y
+		p     *int
+	}
+	var head *Y
+	for i := 0; i < 10; i++ {
+		p := &Y{}
+		p.c = make(chan error)
+		if head != nil {
+			p.nextx = &head.X
+		}
+		p.nexty = head
+		p.p = new(int)
+		*p.p = 42
+		head = p
+		runtime.GC()
+	}
+	for p := head; p != nil; p = p.nexty {
+		if *p.p != 42 {
+			t.Fatal("corrupted heap")
+		}
+	}
+}
+
+func TestGcLastTime(t *testing.T) {
+	ms := new(runtime.MemStats)
+	t0 := time.Now().UnixNano()
+	runtime.GC()
+	t1 := time.Now().UnixNano()
+	runtime.ReadMemStats(ms)
+	last := int64(ms.LastGC)
+	if t0 > last || last > t1 {
+		t.Fatalf("bad last GC time: got %v, want [%v, %v]", last, t0, t1)
+	}
+}
+
+func BenchmarkSetTypeNoPtr1(b *testing.B) {
+	type NoPtr1 struct {
+		p uintptr
+	}
+	var p *NoPtr1
+	for i := 0; i < b.N; i++ {
+		p = &NoPtr1{}
+	}
+	_ = p
+}
+func BenchmarkSetTypeNoPtr2(b *testing.B) {
+	type NoPtr2 struct {
+		p, q uintptr
+	}
+	var p *NoPtr2
+	for i := 0; i < b.N; i++ {
+		p = &NoPtr2{}
+	}
+	_ = p
+}
+func BenchmarkSetTypePtr1(b *testing.B) {
+	type Ptr1 struct {
+		p *byte
+	}
+	var p *Ptr1
+	for i := 0; i < b.N; i++ {
+		p = &Ptr1{}
+	}
+	_ = p
+}
+func BenchmarkSetTypePtr2(b *testing.B) {
+	type Ptr2 struct {
+		p, q *byte
+	}
+	var p *Ptr2
+	for i := 0; i < b.N; i++ {
+		p = &Ptr2{}
+	}
+	_ = p
+}
+
+func BenchmarkAllocation(b *testing.B) {
+	type T struct {
+		x, y *byte
+	}
+	ngo := runtime.GOMAXPROCS(0)
+	work := make(chan bool, b.N+ngo)
+	result := make(chan *T)
+	for i := 0; i < b.N; i++ {
+		work <- true
+	}
+	for i := 0; i < ngo; i++ {
+		work <- false
+	}
+	for i := 0; i < ngo; i++ {
+		go func() {
+			var x *T
+			for <-work {
+				for i := 0; i < 1000; i++ {
+					x = &T{}
+				}
+			}
+			result <- x
+		}()
+	}
+	for i := 0; i < ngo; i++ {
+		<-result
 	}
 }

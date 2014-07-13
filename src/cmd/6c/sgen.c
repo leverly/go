@@ -29,16 +29,14 @@
 // THE SOFTWARE.
 
 #include "gc.h"
+#include "../../pkg/runtime/funcdata.h"
 
 Prog*
 gtext(Sym *s, int32 stkoff)
 {
 	vlong v;
-	
-	v = 0;
-	if(!(textflag & NOSPLIT))
-		v |= argsize() << 32;
-	v |= stkoff & 0xffffffff;
+
+	v = ((uvlong)argsize() << 32) | (stkoff & 0xffffffff);
 	if((textflag & NOSPLIT) && stkoff >= 128)
 		yyerror("stack frame too large for NOSPLIT function");
 
@@ -209,7 +207,7 @@ xcom(Node *n)
 				n->addable = 8;
 			break;
 		}
-		if(n->addable == 8 && !side(n)) {
+		if(n->addable == 8 && !side(n) && !nacl) {
 			indx(n);
 			l = new1(OINDEX, idx.basetree, idx.regtree);
 			l->scale = idx.scale;

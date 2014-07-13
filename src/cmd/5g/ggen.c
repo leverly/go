@@ -9,18 +9,114 @@
 #include "gg.h"
 #include "opt.h"
 
+static Prog* appendpp(Prog*, int, int, int, int32, int, int, int32);
+static Prog *zerorange(Prog *p, vlong frame, vlong lo, vlong hi, uint32 *r0);
+
 void
 defframe(Prog *ptxt)
 {
+	uint32 frame, r0;
+	Prog *p;
+	vlong hi, lo;
+	NodeList *l;
+	Node *n;
+
 	// fill in argument size
 	ptxt->to.type = D_CONST2;
 	ptxt->to.offset2 = rnd(curfn->type->argwid, widthptr);
 
 	// fill in final stack size
-	if(stksize > maxstksize)
-		maxstksize = stksize;
-	ptxt->to.offset = rnd(maxstksize+maxarg, widthptr);
-	maxstksize = 0;
+	frame = rnd(stksize+maxarg, widthptr);
+	ptxt->to.offset = frame;
+	
+	// insert code to contain ambiguously live variables
+	// so that garbage collector only sees initialized values
+	// when it looks for pointers.
+	p = ptxt;
+	lo = hi = 0;
+	r0 = 0;
+	for(l=curfn->dcl; l != nil; l = l->next) {
+		n = l->n;
+		if(!n->needzero)
+			continue;
+		if(n->class != PAUTO)
+			fatal("needzero class %d", n->class);
+		if(n->type->width % widthptr != 0 || n->xoffset % widthptr != 0 || n->type->width == 0)
+			fatal("var %lN has size %d offset %d", n, (int)n->type->width, (int)n->xoffset);
+		if(lo != hi && n->xoffset + n->type->width >= lo - 2*widthptr) {
+			// merge with range we already have
+			lo = rnd(n->xoffset, widthptr);
+			continue;
+		}
+		// zero old range
+		p = zerorange(p, frame, lo, hi, &r0);
+
+		// set new range
+		hi = n->xoffset + n->type->width;
+		lo = n->xoffset;
+	}
+	// zero final range
+	zerorange(p, frame, lo, hi, &r0);
+}
+
+static Prog*
+zerorange(Prog *p, vlong frame, vlong lo, vlong hi, uint32 *r0)
+{
+	vlong cnt, i;
+	Prog *p1;
+	Node *f;
+
+	cnt = hi - lo;
+	if(cnt == 0)
+		return p;
+	if(*r0 == 0) {
+		p = appendpp(p, AMOVW, D_CONST, NREG, 0, D_REG, 0, 0);
+		*r0 = 1;
+	}
+	if(cnt < 4*widthptr) {
+		for(i = 0; i < cnt; i += widthptr) 
+			p = appendpp(p, AMOVW, D_REG, 0, 0, D_OREG, REGSP, 4+frame+lo+i);
+	} else if(cnt <= 128*widthptr) {
+		p = appendpp(p, AADD, D_CONST, NREG, 4+frame+lo, D_REG, 1, 0);
+		p->reg = REGSP;
+		p = appendpp(p, ADUFFZERO, D_NONE, NREG, 0, D_OREG, NREG, 0);
+		f = sysfunc("duffzero");
+		naddr(f, &p->to, 1);
+		afunclit(&p->to, f);
+		p->to.offset = 4*(128-cnt/widthptr);
+	} else {
+		p = appendpp(p, AADD, D_CONST, NREG, 4+frame+lo, D_REG, 1, 0);
+		p->reg = REGSP;
+		p = appendpp(p, AADD, D_CONST, NREG, cnt, D_REG, 2, 0);
+		p->reg = 1;
+		p1 = p = appendpp(p, AMOVW, D_REG, 0, 0, D_OREG, 1, 4);
+		p->scond |= C_PBIT;
+		p = appendpp(p, ACMP, D_REG, 1, 0, D_NONE, 0, 0);
+		p->reg = 2;
+		p = appendpp(p, ABNE, D_NONE, NREG, 0, D_BRANCH, NREG, 0);
+		patch(p, p1);
+	}
+	return p;
+}
+
+static Prog*	
+appendpp(Prog *p, int as, int ftype, int freg, int32 foffset, int ttype, int treg, int32 toffset)	
+{	
+	Prog *q;	
+		
+	q = mal(sizeof(*q));	
+	clearp(q);	
+	q->as = as;	
+	q->lineno = p->lineno;	
+	q->from.type = ftype;	
+	q->from.reg = freg;	
+	q->from.offset = foffset;	
+	q->to.type = ttype;	
+	q->to.reg = treg;	
+	q->to.offset = toffset;	
+	q->link = p->link;	
+	p->link = q;	
+	return q;	
 }
 
 // Sweep the prog list to mark any used nodes.
@@ -28,18 +124,18 @@ void
 markautoused(Prog* p)
 {
 	for (; p; p = p->link) {
-		if (p->as == ATYPE)
+		if (p->as == ATYPE || p->as == AVARDEF || p->as == AVARKILL)
 			continue;
 
-		if (p->from.name == D_AUTO && p->from.node)
+		if (p->from.node)
 			p->from.node->used = 1;
 
-		if (p->to.name == D_AUTO && p->to.node)
+		if (p->to.node)
 			p->to.node->used = 1;
 	}
 }
 
-// Fixup instructions after compactframe has moved all autos around.
+// Fixup instructions after allocauto (formerly compactframe) has moved all autos around.
 void
 fixautoused(Prog* p)
 {
@@ -48,6 +144,16 @@ fixautoused(Prog* p)
 	for (lp=&p; (p=*lp) != P; ) {
 		if (p->as == ATYPE && p->from.node && p->from.name == D_AUTO && !p->from.node->used) {
 			*lp = p->link;
+			continue;
+		}
+		if ((p->as == AVARDEF || p->as == AVARKILL) && p->to.node && !p->to.node->used) {
+			// Cannot remove VARDEF instruction, because - unlike TYPE handled above -
+			// VARDEFs are interspersed with other code, and a jump might be using the
+			// VARDEF as a target. Replace with a no-op instead. A later pass will remove
+			// the no-ops.
+			p->to.type = D_NONE;
+			p->to.node = N;
+			p->as = ANOP;
 			continue;
 		}
 
@@ -73,8 +179,27 @@ fixautoused(Prog* p)
 void
 ginscall(Node *f, int proc)
 {
+	int32 arg;
 	Prog *p;
 	Node n1, r, r1, con;
+
+	if(f->type != T)
+		setmaxarg(f->type);
+
+	arg = -1;
+	// Most functions have a fixed-size argument block, so traceback uses that during unwind.
+	// Not all, though: there are some variadic functions in package runtime,
+	// and for those we emit call-specific metadata recorded by caller.
+	// Reflect generates functions with variable argsize (see reflect.methodValueCall/makeFuncStub),
+	// so we do this for all indirect calls as well.
+	if(f->type != T && (f->sym == S || (f->sym != S && f->sym->pkg == runtimepkg) || proc == 1 || proc == 2)) {
+		arg = f->type->argwid;
+		if(proc == 1 || proc == 2)
+			arg += 3*widthptr;
+	}
+
+	if(arg != -1)
+		gargsize(arg);
 
 	switch(proc) {
 	default:
@@ -84,6 +209,20 @@ ginscall(Node *f, int proc)
 	case 0:	// normal call
 	case -1:	// normal call but no return
 		if(f->op == ONAME && f->class == PFUNC) {
+			if(f == deferreturn) {
+				// Deferred calls will appear to be returning to
+				// the BL deferreturn(SB) that we are about to emit.
+				// However, the stack trace code will show the line
+				// of the instruction before that return PC. 
+				// To avoid that instruction being an unrelated instruction,
+				// insert a NOP so that we will have the right line number.
+				// ARM NOP 0x00000000 is really AND.EQ R0, R0, R0.
+				// Use the latter form because the NOP pseudo-instruction
+				// would be removed by the linker.
+				nodreg(&r, types[TINT], 0);
+				p = gins(AAND, &r, &r);
+				p->scond = C_SCOND_EQ;
+			}
 			p = gins(ABL, N, f);
 			afunclit(&p->to, f);
 			if(proc == -1 || noreturn(p))
@@ -152,10 +291,15 @@ ginscall(Node *f, int proc)
 			nodconst(&con, types[TINT32], 0);
 			p = gins(ACMP, &con, N);
 			p->reg = 0;
-			patch(gbranch(ABNE, T, -1), retpc);
+			p = gbranch(ABEQ, T, +1);
+			cgen_ret(N);
+			patch(p, pc);
 		}
 		break;
 	}
+	
+	if(arg != -1)
+		gargsize(-1);
 }
 
 /*
@@ -211,6 +355,7 @@ cgen_callinter(Node *n, Node *res, int proc)
 
 	nodo.xoffset -= widthptr;
 	cgen(&nodo, &nodr);	// REG = 0(REG) -- i.tab
+	cgen_checknil(&nodr); // in case offset is huge
 
 	nodo.xoffset = n->left->xoffset + 3*widthptr + 8;
 	
@@ -225,14 +370,11 @@ cgen_callinter(Node *n, Node *res, int proc)
 		p->from.type = D_CONST;	// REG = &(20+offset(REG)) -- i.tab->fun[f]
 	}
 
-	// BOTCH nodr.type = fntype;
 	nodr.type = n->left->type;
 	ginscall(&nodr, proc);
 
 	regfree(&nodr);
 	regfree(&nodo);
-
-	setmaxarg(n->left->type);
 }
 
 /*
@@ -259,8 +401,6 @@ cgen_call(Node *n, int proc)
 
 	genlist(n->list);		// assign the args
 	t = n->left->type;
-
-	setmaxarg(t);
 
 	// call tempname pointer
 	if(n->left->ullman >= UINF) {
@@ -365,11 +505,19 @@ cgen_aret(Node *n, Node *res)
 void
 cgen_ret(Node *n)
 {
-	genlist(n->list);		// copy out args
-	if(hasdefer || curfn->exit)
-		gjmp(retpc);
-	else
-		gins(ARET, N, N);
+	Prog *p;
+
+	if(n != N)
+		genlist(n->list);		// copy out args
+	if(hasdefer)
+		ginscall(deferreturn, 0);
+	genlist(curfn->exit);
+	p = gins(ARET, N, N);
+	if(n != N && n->op == ORETJMP) {
+		p->to.name = D_EXTERN;
+		p->to.type = D_CONST;
+		p->to.sym = linksym(n->left->sym);
+	}
 }
 
 /*
@@ -601,6 +749,8 @@ cgen_shift(int op, int bounded, Node *nl, Node *nr, Node *res)
 			gshift(AMOVW, &n2, SHIFT_LL, v, &n1);
 			gshift(AORR, &n2, SHIFT_LR, w-v, &n1);
 			regfree(&n2);
+			// Ensure sign/zero-extended result.
+			gins(optoas(OAS, nl->type), &n1, &n1);
 		}
 		gmove(&n1, res);
 		regfree(&n1);
@@ -626,6 +776,8 @@ cgen_shift(int op, int bounded, Node *nl, Node *nr, Node *res)
 			else // OLSH
 				gshift(AMOVW, &n1, SHIFT_LL, sc, &n1);
 		}
+		if(w < 32 && op == OLSH)
+			gins(optoas(OAS, nl->type), &n1, &n1);
 		gmove(&n1, res);
 		regfree(&n1);
 		return;
@@ -699,6 +851,9 @@ cgen_shift(int op, int bounded, Node *nl, Node *nr, Node *res)
 	regfree(&n3);
 
 	patch(p3, pc);
+	// Left-shift of smaller word must be sign/zero-extended.
+	if(w < 32 && op == OLSH)
+		gins(optoas(OAS, nl->type), &n2, &n2);
 	gmove(&n2, res);
 
 	regfree(&n1);
@@ -709,13 +864,12 @@ void
 clearfat(Node *nl)
 {
 	uint32 w, c, q;
-	Node dst, nc, nz, end;
+	Node dst, nc, nz, end, r0, r1, *f;
 	Prog *p, *pl;
 
 	/* clear a fat object */
 	if(debug['g'])
 		dump("\nclearfat", nl);
-
 
 	w = nl->type->width;
 	// Avoid taking the address for simple enough types.
@@ -725,13 +879,17 @@ clearfat(Node *nl)
 	c = w % 4;	// bytes
 	q = w / 4;	// quads
 
-	regalloc(&dst, types[tptr], N);
+	r0.op = OREGISTER;
+	r0.val.u.reg = REGALLOC_R0;
+	r1.op = OREGISTER;
+	r1.val.u.reg = REGALLOC_R0 + 1;
+	regalloc(&dst, types[tptr], &r1);
 	agen(nl, &dst);
 	nodconst(&nc, types[TUINT32], 0);
-	regalloc(&nz, types[TUINT32], 0);
+	regalloc(&nz, types[TUINT32], &r0);
 	cgen(&nc, &nz);
 
-	if(q >= 4) {
+	if(q > 128) {
 		regalloc(&end, types[tptr], N);
 		p = gins(AMOVW, &dst, &end);
 		p->from.type = D_CONST;
@@ -748,6 +906,12 @@ clearfat(Node *nl)
 		patch(gbranch(ABNE, T, 0), pl);
 
 		regfree(&end);
+	} else if(q >= 4) {
+		f = sysfunc("duffzero");
+		p = gins(ADUFFZERO, N, f);
+		afunclit(&p->to, f);
+		// 4 and 128 = magic constants: see ../../pkg/runtime/asm_arm.s
+		p->to.offset = 4*(128-q);
 	} else
 	while(q > 0) {
 		p = gins(AMOVW, &nz, &dst);
@@ -759,7 +923,7 @@ clearfat(Node *nl)
 	}
 
 	while(c > 0) {
-		p = gins(AMOVBU, &nz, &dst);
+		p = gins(AMOVB, &nz, &dst);
 		p->to.type = D_OREG;
 		p->to.offset = 1;
  		p->scond |= C_PBIT;
@@ -768,4 +932,44 @@ clearfat(Node *nl)
 	}
 	regfree(&dst);
 	regfree(&nz);
+}
+
+// Called after regopt and peep have run.
+// Expand CHECKNIL pseudo-op into actual nil pointer check.
+void
+expandchecks(Prog *firstp)
+{
+	int reg;
+	Prog *p, *p1;
+
+	for(p = firstp; p != P; p = p->link) {
+		if(p->as != ACHECKNIL)
+			continue;
+		if(debug_checknil && p->lineno > 1) // p->lineno==1 in generated wrappers
+			warnl(p->lineno, "generated nil check");
+		if(p->from.type != D_REG)
+			fatal("invalid nil check %P", p);
+		reg = p->from.reg;
+		// check is
+		//	CMP arg, $0
+		//	MOV.EQ arg, 0(arg)
+		p1 = mal(sizeof *p1);
+		clearp(p1);
+		p1->link = p->link;
+		p->link = p1;
+		p1->lineno = p->lineno;
+		p1->pc = 9999;
+		p1->as = AMOVW;
+		p1->from.type = D_REG;
+		p1->from.reg = reg;
+		p1->to.type = D_OREG;
+		p1->to.reg = reg;
+		p1->to.offset = 0;
+		p1->scond = C_SCOND_EQ;
+		p->as = ACMP;
+		p->from.type = D_CONST;
+		p->from.reg = NREG;
+		p->from.offset = 0;
+		p->reg = reg;
+	}
 }

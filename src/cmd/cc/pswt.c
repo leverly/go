@@ -102,28 +102,29 @@ newcase(void)
 }
 
 int32
-outlstring(ushort *s, int32 n)
+outlstring(TRune *s, int32 n)
 {
-	char buf[2];
-	int c;
+	char buf[sizeof(TRune)];
+	uint c;
+	int i;
 	int32 r;
 
 	if(suppress)
 		return nstring;
-	while(nstring & 1)
+	while(nstring & (sizeof(TRune)-1))
 		outstring("", 1);
 	r = nstring;
 	while(n > 0) {
 		c = *s++;
 		if(align(0, types[TCHAR], Aarg1, nil)) {
-			buf[0] = c>>8;
-			buf[1] = c;
+			for(i = 0; i < sizeof(TRune); i++)
+				buf[i] = c>>(8*(sizeof(TRune) - i - 1));
 		} else {
-			buf[0] = c;
-			buf[1] = c>>8;
+			for(i = 0; i < sizeof(TRune); i++)
+				buf[i] = c>>(8*i);
 		}
-		outstring(buf, 2);
-		n -= sizeof(ushort);
+		outstring(buf, sizeof(TRune));
+		n -= sizeof(TRune);
 	}
 	return r;
 }
@@ -136,33 +137,4 @@ nullwarn(Node *l, Node *r)
 		cgen(l, Z);
 	if(r != Z)
 		cgen(r, Z);
-}
-
-void
-ieeedtod(Ieee *ieee, double native)
-{
-	double fr, ho, f;
-	int exp;
-
-	if(native < 0) {
-		ieeedtod(ieee, -native);
-		ieee->h |= 0x80000000L;
-		return;
-	}
-	if(native == 0) {
-		ieee->l = 0;
-		ieee->h = 0;
-		return;
-	}
-	fr = frexp(native, &exp);
-	f = 2097152L;		/* shouldnt use fp constants here */
-	fr = modf(fr*f, &ho);
-	ieee->h = ho;
-	ieee->h &= 0xfffffL;
-	ieee->h |= (exp+1022L) << 20;
-	f = 65536L;
-	fr = modf(fr*f, &ho);
-	ieee->l = ho;
-	ieee->l <<= 16;
-	ieee->l |= (int32)(fr*f);
 }

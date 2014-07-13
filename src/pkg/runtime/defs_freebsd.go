@@ -19,6 +19,7 @@ package runtime
 #include <sys/time.h>
 #include <signal.h>
 #include <errno.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
 #include <sys/umtx.h>
@@ -30,6 +31,9 @@ package runtime
 import "C"
 
 const (
+	EINTR  = C.EINTR
+	EFAULT = C.EFAULT
+
 	PROT_NONE  = C.PROT_NONE
 	PROT_READ  = C.PROT_READ
 	PROT_WRITE = C.PROT_WRITE
@@ -45,10 +49,10 @@ const (
 	SA_RESTART = C.SA_RESTART
 	SA_ONSTACK = C.SA_ONSTACK
 
-	UMTX_OP_WAIT_UINT = C.UMTX_OP_WAIT_UINT
-	UMTX_OP_WAKE      = C.UMTX_OP_WAKE
-
-	EINTR = C.EINTR
+	UMTX_OP_WAIT_UINT         = C.UMTX_OP_WAIT_UINT
+	UMTX_OP_WAIT_UINT_PRIVATE = C.UMTX_OP_WAIT_UINT_PRIVATE
+	UMTX_OP_WAKE              = C.UMTX_OP_WAKE
+	UMTX_OP_WAKE_PRIVATE      = C.UMTX_OP_WAKE_PRIVATE
 
 	SIGHUP    = C.SIGHUP
 	SIGINT    = C.SIGINT
@@ -101,6 +105,14 @@ const (
 	ITIMER_REAL    = C.ITIMER_REAL
 	ITIMER_VIRTUAL = C.ITIMER_VIRTUAL
 	ITIMER_PROF    = C.ITIMER_PROF
+
+	EV_ADD       = C.EV_ADD
+	EV_DELETE    = C.EV_DELETE
+	EV_CLEAR     = C.EV_CLEAR
+	EV_RECEIPT   = C.EV_RECEIPT
+	EV_ERROR     = C.EV_ERROR
+	EVFILT_READ  = C.EVFILT_READ
+	EVFILT_WRITE = C.EVFILT_WRITE
 )
 
 type Rtprio C.struct_rtprio
@@ -117,3 +129,5 @@ type Ucontext C.ucontext_t
 type Timespec C.struct_timespec
 type Timeval C.struct_timeval
 type Itimerval C.struct_itimerval
+
+type Kevent C.struct_kevent

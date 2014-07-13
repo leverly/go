@@ -1,3 +1,5 @@
+// +build !plan9
+
 /*
 Plan 9 from User Space src/lib9/execl.c
 http://code.swtch.com/plan9port/src/tip/src/lib9/execl.c
@@ -37,7 +39,7 @@ execl(char *prog, ...)
 		;
 	va_end(arg);
 
-	argv = malloc((i+1)*sizeof(char*));
+	argv = malloc((size_t)(i+1)*sizeof(char*));
 	if(argv == nil)
 		return -1;
 

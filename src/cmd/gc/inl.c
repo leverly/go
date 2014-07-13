@@ -146,6 +146,7 @@ caninl(Node *fn)
 
 	fn->nname->inl = fn->nbody;
 	fn->nbody = inlcopylist(fn->nname->inl);
+	fn->nname->inldcl = inlcopylist(fn->nname->defn->dcl);
 
 	// hack, TODO, check for better way to link method nodes back to the thing with the ->inl
 	// this is so export can find the body of a method
@@ -197,6 +198,7 @@ ishairy(Node *n, int *budget)
 	case ODEFER:
 	case ODCLTYPE:  // can't print yet
 	case ODCLCONST:  // can't print yet
+	case ORETJMP:
 		return 1;
 
 		break;
@@ -390,6 +392,8 @@ inlnode(Node **np)
 	case OCALLFUNC:
 	case OCALLMETH:
 	case OCALLINTER:
+	case OAPPEND:
+	case OCOMPLEX:
 		// if we just replaced arg in f(arg()) or return arg with an inlined call
 		// and arg returns multiple values, glue as list
 		if(count(n->list) == 1 && n->list->n->op == OINLCALL && count(n->list->n->rlist) > 1) {
@@ -558,8 +562,8 @@ mkinlcall1(Node **np, Node *fn, int isddd)
 
 //dumplist("ninit pre", ninit);
 
-	if (fn->defn) // local function
-		dcl = fn->defn->dcl;
+	if(fn->defn) // local function
+		dcl = fn->inldcl;
 	else // imported function
 		dcl = fn->dcl;
 
@@ -798,6 +802,7 @@ inlvar(Node *var)
 	n->class = PAUTO;
 	n->used = 1;
 	n->curfn = curfn;   // the calling function, not the called one
+	n->addrtaken = var->addrtaken;
 
 	// esc pass wont run if we're inlining into a iface wrapper
 	// luckily, we can steal the results from the target func

@@ -13,7 +13,7 @@ import (
 )
 
 var cmdClean = &Command{
-	UsageLine: "clean [-i] [-r] [-n] [-x] [packages]",
+	UsageLine: "clean [-i] [-r] [-n] [-x] [build flags] [packages]",
 	Short:     "remove object files",
 	Long: `
 Clean removes object files from package source directories.
@@ -52,23 +52,26 @@ dependencies of the packages named by the import paths.
 
 The -x flag causes clean to print remove commands as it executes them.
 
+For more about build flags, see 'go help build'.
+
 For more about specifying packages, see 'go help packages'.
 	`,
 }
 
 var cleanI bool // clean -i flag
-var cleanN bool // clean -n flag
 var cleanR bool // clean -r flag
-var cleanX bool // clean -x flag
 
 func init() {
 	// break init cycle
 	cmdClean.Run = runClean
 
 	cmdClean.Flag.BoolVar(&cleanI, "i", false, "")
-	cmdClean.Flag.BoolVar(&cleanN, "n", false, "")
 	cmdClean.Flag.BoolVar(&cleanR, "r", false, "")
-	cmdClean.Flag.BoolVar(&cleanX, "x", false, "")
+	// -n and -x are important enough to be
+	// mentioned explicitly in the docs but they
+	// are part of the build flags.
+
+	addBuildFlags(cmdClean)
 }
 
 func runClean(cmd *Command, args []string) {
@@ -137,23 +140,39 @@ func clean(p *Package) {
 	}
 
 	_, elem := filepath.Split(p.Dir)
-	allRemove := []string{
-		elem,
-		elem + ".exe",
-		elem + ".test",
-		elem + ".test.exe",
+	var allRemove []string
+
+	// Remove dir-named executable only if this is package main.
+	if p.Name == "main" {
+		allRemove = append(allRemove,
+			elem,
+			elem+".exe",
+		)
 	}
+
+	// Remove package test executables.
+	allRemove = append(allRemove,
+		elem+".test",
+		elem+".test.exe",
+	)
+
+	// Remove a potential executable for each .go file in the directory that
+	// is not part of the directory's package.
 	for _, dir := range dirs {
 		name := dir.Name()
 		if packageFile[name] {
 			continue
 		}
 		if !dir.IsDir() && strings.HasSuffix(name, ".go") {
+			// TODO(adg,rsc): check that this .go file is actually
+			// in "package main", and therefore capable of building
+			// to an executable file.
 			base := name[:len(name)-len(".go")]
 			allRemove = append(allRemove, base, base+".exe")
 		}
 	}
-	if cleanN || cleanX {
+
+	if buildN || buildX {
 		b.showcmd(p.Dir, "rm -f %s", strings.Join(allRemove, " "))
 	}
 
@@ -166,9 +185,9 @@ func clean(p *Package) {
 		if dir.IsDir() {
 			// TODO: Remove once Makefiles are forgotten.
 			if cleanDir[name] {
-				if cleanN || cleanX {
+				if buildN || buildX {
 					b.showcmd(p.Dir, "rm -r %s", name)
-					if cleanN {
+					if buildN {
 						continue
 					}
 				}
@@ -179,7 +198,7 @@ func clean(p *Package) {
 			continue
 		}
 
-		if cleanN {
+		if buildN {
 			continue
 		}
 
@@ -189,25 +208,11 @@ func clean(p *Package) {
 	}
 
 	if cleanI && p.target != "" {
-		if cleanN || cleanX {
+		if buildN || buildX {
 			b.showcmd("", "rm -f %s", p.target)
 		}
-		if !cleanN {
+		if !buildN {
 			removeFile(p.target)
-		}
-	}
-
-	if cleanI && p.usesSwig() {
-		for _, f := range stringList(p.SwigFiles, p.SwigCXXFiles) {
-			dir := p.swigDir(&buildContext)
-			soname := p.swigSoname(f)
-			target := filepath.Join(dir, soname)
-			if cleanN || cleanX {
-				b.showcmd("", "rm -f %s", target)
-			}
-			if !cleanN {
-				removeFile(target)
-			}
 		}
 	}
 
@@ -221,7 +226,23 @@ func clean(p *Package) {
 // removeFile tries to remove file f, if error other than file doesn't exist
 // occurs, it will report the error.
 func removeFile(f string) {
-	if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
-		errorf("go clean: %v", err)
+	err := os.Remove(f)
+	if err == nil || os.IsNotExist(err) {
+		return
 	}
+	// Windows does not allow deletion of a binary file while it is executing.
+	if toolIsWindows {
+		// Remove lingering ~ file from last attempt.
+		if _, err2 := os.Stat(f + "~"); err2 == nil {
+			os.Remove(f + "~")
+		}
+		// Try to move it out of the way. If the move fails,
+		// which is likely, we'll try again the
+		// next time we do an install of this binary.
+		if err2 := os.Rename(f, f+"~"); err2 == nil {
+			os.Remove(f + "~")
+			return
+		}
+	}
+	errorf("go clean: %v", err)
 }

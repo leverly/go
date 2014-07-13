@@ -33,14 +33,15 @@
 #include <stdio.h>	/* if we don't, bison will, and a.h re-#defines getc */
 #include <libc.h>
 #include "a.h"
+#include "../../pkg/runtime/funcdata.h"
 %}
 %union	{
 	Sym	*sym;
 	vlong	lval;
 	double	dval;
 	char	sval[8];
-	Gen	gen;
-	Gen2	gen2;
+	Addr	addr;
+	Addr2	addr2;
 }
 %left	'|'
 %left	'^'
@@ -49,17 +50,18 @@
 %left	'+' '-'
 %left	'*' '/' '%'
 %token	<lval>	LTYPE0 LTYPE1 LTYPE2 LTYPE3 LTYPE4
-%token	<lval>	LTYPEC LTYPED LTYPEN LTYPER LTYPET LTYPEG
-%token	<lval>	LTYPES LTYPEM LTYPEI LTYPEXC LTYPEX LTYPERT
+%token	<lval>	LTYPEC LTYPED LTYPEN LTYPER LTYPET LTYPEG LTYPEPC
+%token	<lval>	LTYPES LTYPEM LTYPEI LTYPEXC LTYPEX LTYPERT LTYPEF
 %token	<lval>	LCONST LFP LPC LSB
 %token	<lval>	LBREG LLREG LSREG LFREG LMREG LXREG
 %token	<dval>	LFCONST
 %token	<sval>	LSCONST LSP
 %token	<sym>	LNAME LLAB LVAR
 %type	<lval>	con con2 expr pointer offset
-%type	<gen>	mem imm imm2 reg nam rel rem rim rom omem nmem
-%type	<gen2>	nonnon nonrel nonrem rimnon rimrem remrim spec10 spec11
-%type	<gen2>	spec1 spec2 spec3 spec4 spec5 spec6 spec7 spec8 spec9
+%type	<addr>	mem imm imm2 reg nam rel rem rim rom omem nmem
+%type	<addr2>	nonnon nonrel nonrem rimnon rimrem remrim
+%type	<addr2>	spec1 spec2 spec3 spec4 spec5 spec6 spec7 spec8 spec9
+%type	<addr2>	spec10 spec11 spec12 spec13
 %%
 prog:
 |	prog 
@@ -115,6 +117,8 @@ inst:
 |	LTYPEX spec9	{ outcode($1, &$2); }
 |	LTYPERT spec10	{ outcode($1, &$2); }
 |	LTYPEG spec11	{ outcode($1, &$2); }
+|	LTYPEPC spec12	{ outcode($1, &$2); }
+|	LTYPEF spec13	{ outcode($1, &$2); }
 
 nonnon:
 	{
@@ -308,6 +312,26 @@ spec11:	/* GLOBL */
 		$$.to = $5;
 	}
 
+spec12:	/* PCDATA */
+	rim ',' rim
+	{
+		if($1.type != D_CONST || $3.type != D_CONST)
+			yyerror("arguments to PCDATA must be integer constants");
+		$$.from = $1;
+		$$.to = $3;
+	}
+
+spec13:	/* FUNCDATA */
+	rim ',' rim
+	{
+		if($1.type != D_CONST)
+			yyerror("index for FUNCDATA must be integer constant");
+		if($3.type != D_EXTERN && $3.type != D_STATIC)
+			yyerror("value for FUNCDATA must be symbol reference");
+		$$.from = $1;
+		$$.to = $3;
+	}
+
 rem:
 	reg
 |	mem
@@ -343,14 +367,12 @@ rel:
 		if(pass == 2)
 			yyerror("undefined label: %s", $1->name);
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $2;
 	}
 |	LLAB offset
 	{
 		$$ = nullgen;
 		$$.type = D_BRANCH;
-		$$.sym = $1;
 		$$.offset = $1->value + $2;
 	}
 
@@ -420,31 +442,31 @@ imm:
 	{
 		$$ = nullgen;
 		$$.type = D_SCONST;
-		memcpy($$.sval, $2, sizeof($$.sval));
+		memcpy($$.u.sval, $2, sizeof($$.u.sval));
 	}
 |	'$' LFCONST
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = $2;
+		$$.u.dval = $2;
 	}
 |	'$' '(' LFCONST ')'
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = $3;
+		$$.u.dval = $3;
 	}
 |	'$' '(' '-' LFCONST ')'
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = -$4;
+		$$.u.dval = -$4;
 	}
 |	'$' '-' LFCONST
 	{
 		$$ = nullgen;
 		$$.type = D_FCONST;
-		$$.dval = -$3;
+		$$.u.dval = -$3;
 	}
 
 mem:
@@ -486,6 +508,15 @@ omem:
 		checkscale($$.scale);
 	}
 |	con '(' LLREG ')' '(' LLREG '*' con ')'
+	{
+		$$ = nullgen;
+		$$.type = D_INDIR+$3;
+		$$.offset = $1;
+		$$.index = $6;
+		$$.scale = $8;
+		checkscale($$.scale);
+	}
+|	con '(' LLREG ')' '(' LSREG '*' con ')'
 	{
 		$$ = nullgen;
 		$$.type = D_INDIR+$3;
@@ -539,14 +570,14 @@ nam:
 	{
 		$$ = nullgen;
 		$$.type = $4;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 0);
 		$$.offset = $2;
 	}
 |	LNAME '<' '>' offset '(' LSB ')'
 	{
 		$$ = nullgen;
 		$$.type = D_STATIC;
-		$$.sym = $1;
+		$$.sym = linklookup(ctxt, $1->name, 1);
 		$$.offset = $4;
 	}
 
@@ -597,11 +628,13 @@ con:
 con2:
 	LCONST
 	{
-		$$ = $1 & 0xffffffffLL;
+		$$ = ($1 & 0xffffffffLL) +
+			((vlong)ArgsSizeUnknown << 32);
 	}
 |	'-' LCONST
 	{
-		$$ = -$2 & 0xffffffffLL;
+		$$ = (-$2 & 0xffffffffLL) +
+			((vlong)ArgsSizeUnknown << 32);
 	}
 |	LCONST '-' LCONST
 	{

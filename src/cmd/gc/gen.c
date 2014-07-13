@@ -301,6 +301,9 @@ gen(Node *n)
 		break;
 
 	case OLABEL:
+		if(isblanksym(n->left->sym))
+			break;
+		
 		lab = newlab(n);
 
 		// if there are pending gotos, resolve them all to the current pc.
@@ -489,11 +492,17 @@ gen(Node *n)
 		break;
 
 	case ORETURN:
+	case ORETJMP:
 		cgen_ret(n);
 		break;
 	
-	case OCHECKNOTNIL:
-		checkref(n->left, 1);
+	case OCHECKNIL:
+		cgen_checknil(n->left);
+		break;
+	
+	case OVARKILL:
+		gvarkill(n->left);
+		break;
 	}
 
 ret:
@@ -561,8 +570,7 @@ cgen_proc(Node *n, int proc)
 
 /*
  * generate declaration.
- * nothing to do for on-stack automatics,
- * but might have to allocate heap copy
+ * have to allocate heap copy
  * for escaped variables.
  */
 static void
@@ -627,6 +635,10 @@ cgen_discard(Node *nr)
 	case ONOT:
 	case OPLUS:
 		cgen_discard(nr->left);
+		break;
+	
+	case OIND:
+		cgen_checknil(nr->left);
 		break;
 
 	// special enough to just evaluate
@@ -734,6 +746,8 @@ cgen_as(Node *nl, Node *nr)
 		if(tl == T)
 			return;
 		if(isfat(tl)) {
+			if(nl->op == ONAME)
+				gvardef(nl);
 			clearfat(nl);
 			return;
 		}
@@ -762,10 +776,18 @@ cgen_eface(Node *n, Node *res)
 	 * so it's important that it is done first
 	 */
 	Node dst;
+	Node *tmp;
+
+	tmp = temp(types[tptr]);
+	cgen(n->right, tmp);
+
+	gvardef(res);
+
 	dst = *res;
 	dst.type = types[tptr];
 	dst.xoffset += widthptr;
-	cgen(n->right, &dst);
+	cgen(tmp, &dst);
+
 	dst.xoffset -= widthptr;
 	cgen(n->left, &dst);
 }
@@ -776,17 +798,67 @@ cgen_eface(Node *n, Node *res)
  * n->left is s
  * n->list is (cap(s)-lo(TUINT), hi-lo(TUINT)[, lo*width(TUINTPTR)])
  * caller (cgen) guarantees res is an addable ONAME.
+ *
+ * called for OSLICE, OSLICE3, OSLICEARR, OSLICE3ARR, OSLICESTR.
  */
 void
 cgen_slice(Node *n, Node *res)
 {
-	Node src, dst, *cap, *len, *offs, *add;
+	Node src, dst, *cap, *len, *offs, *add, *base;
 
 	cap = n->list->n;
 	len = n->list->next->n;
 	offs = N;
 	if(n->list->next->next)
 		offs = n->list->next->next->n;
+
+	// evaluate base pointer first, because it is the only
+	// possibly complex expression. once that is evaluated
+	// and stored, updating the len and cap can be done
+	// without making any calls, so without doing anything that
+	// might cause preemption or garbage collection.
+	// this makes the whole slice update atomic as far as the
+	// garbage collector can see.
+	
+	base = temp(types[TUINTPTR]);
+
+	if(isnil(n->left)) {
+		tempname(&src, n->left->type);
+		cgen(n->left, &src);
+	} else
+		src = *n->left;
+	if(n->op == OSLICE || n->op == OSLICE3 || n->op == OSLICESTR)
+		src.xoffset += Array_array;
+
+	if(n->op == OSLICEARR || n->op == OSLICE3ARR) {
+		if(!isptr[n->left->type->etype])
+			fatal("slicearr is supposed to work on pointer: %+N\n", n);
+		cgen(&src, base);
+		cgen_checknil(base);
+		if(offs != N) {
+			add = nod(OADD, base, offs);
+			typecheck(&add, Erv);
+			cgen(add, base);
+		}
+	} else if(offs == N) {
+		src.type = types[tptr];
+		cgen(&src, base);
+	} else {
+		src.type = types[tptr];
+		add = nod(OADDPTR, &src, offs);
+		typecheck(&add, Erv);
+		cgen(add, base);
+	}
+	
+	// committed to the update
+	gvardef(res);
+
+	// dst.array = src.array  [ + lo *width ]
+	dst = *res;
+	dst.xoffset += Array_array;
+	dst.type = types[tptr];
+	
+	cgen(base, &dst);
 
 	// dst.len = hi [ - lo ]
 	dst = *res;
@@ -800,33 +872,6 @@ cgen_slice(Node *n, Node *res)
 		dst.xoffset += Array_cap;
 		dst.type = types[simtype[TUINT]];
 		cgen(cap, &dst);
-	}
-
-	// dst.array = src.array  [ + lo *width ]
-	dst = *res;
-	dst.xoffset += Array_array;
-	dst.type = types[TUINTPTR];
-
-	if(n->op == OSLICEARR) {
-		if(!isptr[n->left->type->etype])
-			fatal("slicearr is supposed to work on pointer: %+N\n", n);
-		checkref(n->left, 0);
-	}
-
-	if(isnil(n->left)) {
-		tempname(&src, n->left->type);
-		cgen(n->left, &src);
-	} else
-		src = *n->left;
-	src.xoffset += Array_array;
-	src.type = types[TUINTPTR];
-
-	if(offs == N) {
-		cgen(&src, &dst);
-	} else {
-		add = nod(OADD, &src, offs);
-		typecheck(&add, Erv);
-		cgen(add, &dst);
 	}
 }
 
@@ -923,5 +968,5 @@ temp(Type *t)
 	n = nod(OXXX, N, N);
 	tempname(n, t);
 	n->sym->def->used = 1;
-	return n;
+	return n->orig;
 }

@@ -31,9 +31,11 @@
 #include <u.h>
 #include <libc.h>
 #include "gg.h"
+#include "../../pkg/runtime/funcdata.h"
 
 // TODO(rsc): Can make this bigger if we move
 // the text segment up higher in 8l for all GOOS.
+// At the same time, can raise StackBig in ../../pkg/runtime/stack.h.
 uint32 unmappedzero = 4096;
 
 #define	CASE(a,b)	(((a)<<16)|((b)<<0))
@@ -46,7 +48,7 @@ clearp(Prog *p)
 	p->from.index = D_NONE;
 	p->to.type = D_NONE;
 	p->to.index = D_NONE;
-	p->loc = pcloc;
+	p->pc = pcloc;
 	pcloc++;
 }
 
@@ -135,7 +137,7 @@ patch(Prog *p, Prog *to)
 	if(p->to.type != D_BRANCH)
 		fatal("patch: not a branch");
 	p->to.u.branch = to;
-	p->to.offset = to->loc;
+	p->to.offset = to->pc;
 }
 
 Prog*
@@ -159,13 +161,8 @@ newplist(void)
 {
 	Plist *pl;
 
-	pl = mal(sizeof(*pl));
-	if(plist == nil)
-		plist = pl;
-	else
-		plast->link = pl;
-	plast = pl;
-
+	pl = linknewplist(ctxt);
+	
 	pc = mal(sizeof(*pc));
 	clearp(pc);
 	pl->firstpc = pc;
@@ -197,14 +194,24 @@ ggloblnod(Node *nam)
 
 	p = gins(AGLOBL, nam, N);
 	p->lineno = nam->lineno;
-	p->from.gotype = ngotype(nam);
-	p->to.sym = S;
+	p->from.sym->gotype = linksym(ngotype(nam));
+	p->to.sym = nil;
 	p->to.type = D_CONST;
 	p->to.offset = nam->type->width;
 	if(nam->readonly)
 		p->from.scale = RODATA;
 	if(nam->type != T && !haspointers(nam->type))
 		p->from.scale |= NOPTR;
+}
+
+void
+gargsize(int32 size)
+{
+	Node n1, n2;
+	
+	nodconst(&n1, types[TINT32], PCDATA_ArgSize);
+	nodconst(&n2, types[TINT32], size);
+	gins(APCDATA, &n1, &n2);
 }
 
 void
@@ -215,7 +222,7 @@ ggloblsym(Sym *s, int32 width, int dupok, int rodata)
 	p = gins(AGLOBL, N, N);
 	p->from.type = D_EXTERN;
 	p->from.index = D_NONE;
-	p->from.sym = s;
+	p->from.sym = linksym(s);
 	p->to.type = D_CONST;
 	p->to.index = D_NONE;
 	p->to.offset = width;
@@ -233,7 +240,7 @@ gtrack(Sym *s)
 	p = gins(AUSEFIELD, N, N);
 	p->from.type = D_EXTERN;
 	p->from.index = D_NONE;
-	p->from.sym = s;
+	p->from.sym = linksym(s);
 }
 
 int
@@ -261,7 +268,7 @@ afunclit(Addr *a, Node *n)
 	if(a->type == D_ADDR && a->index == D_EXTERN) {
 		a->type = D_EXTERN;
 		a->index = D_NONE;
-		a->sym = n->sym;
+		a->sym = linksym(n->sym);
 	}
 }
 
@@ -425,6 +432,7 @@ optoas(int op, Type *t)
 	case CASE(OADD, TINT32):
 	case CASE(OADD, TUINT32):
 	case CASE(OADD, TPTR32):
+	case CASE(OADDPTR, TPTR32):
 		a = AADDL;
 		break;
 
@@ -1036,6 +1044,7 @@ Node*
 nodarg(Type *t, int fp)
 {
 	Node *n;
+	NodeList *l;
 	Type *first;
 	Iter savet;
 
@@ -1060,6 +1069,14 @@ nodarg(Type *t, int fp)
 		break;
 
 	case TFIELD:
+		if(fp == 1 && t->sym != S && !isblanksym(t->sym)) {
+			for(l=curfn->dcl; l; l=l->next) {
+				n = l->n;
+				if((n->class == PPARAM || n->class == PPARAMOUT) && n->sym == t->sym)
+					return n;
+			}
+		}
+
 		n = nod(ONAME, N, N);
 		n->type = t->type;
 		n->sym = t->sym;
@@ -1145,6 +1162,7 @@ ismem(Node *n)
 {
 	switch(n->op) {
 	case OITAB:
+	case OSPTR:
 	case OLEN:
 	case OCAP:
 	case OINDREG:
@@ -1679,7 +1697,6 @@ floatmove(Node *f, Node *t)
 		gins(ACMPL, &thi, ncon(0));
 		p1 = gbranch(AJLT, T, 0);
 		// native
-		t1.type = types[TINT64];
 		nodreg(&r1, types[tt], D_F0);
 		gins(AFMOVV, &t1, &r1);
 		if(tt == TFLOAT32)
@@ -2158,43 +2175,6 @@ gins(int as, Node *f, Node *t)
 	return p;
 }
 
-// Generate an instruction referencing *n
-// to force segv on nil pointer dereference.
-void
-checkref(Node *n, int force)
-{
-	Node m;
-
-	if(!force && isptr[n->type->etype] && n->type->type->width < unmappedzero)
-		return;
-
-	regalloc(&m, types[TUINTPTR], n);
-	cgen(n, &m);
-	m.xoffset = 0;
-	m.op = OINDREG;
-	m.type = types[TUINT8];
-	gins(ATESTB, nodintconst(0), &m);
-	regfree(&m);
-}
-
-static void
-checkoffset(Addr *a, int canemitcode)
-{
-	Prog *p;
-
-	if(a->offset < unmappedzero)
-		return;
-	if(!canemitcode)
-		fatal("checkoffset %#x, cannot emit code", a->offset);
-
-	// cannot rely on unmapped nil page at 0 to catch
-	// reference with large offset.  instead, emit explicit
-	// test of 0(reg).
-	p = gins(ATESTB, nodintconst(0), N);
-	p->to = *a;
-	p->to.offset = 0;
-}
-
 /*
  * generate code to compute n;
  * make a refer to result.
@@ -2202,10 +2182,12 @@ checkoffset(Addr *a, int canemitcode)
 void
 naddr(Node *n, Addr *a, int canemitcode)
 {
+	Sym *s;
+
 	a->scale = 0;
 	a->index = D_NONE;
 	a->type = D_NONE;
-	a->gotype = S;
+	a->gotype = nil;
 	a->node = N;
 	if(n == N)
 		return;
@@ -2217,12 +2199,12 @@ naddr(Node *n, Addr *a, int canemitcode)
 
 	case OREGISTER:
 		a->type = n->val.u.reg;
-		a->sym = S;
+		a->sym = nil;
 		break;
 
 	case OINDREG:
 		a->type = n->val.u.reg+D_INDIR;
-		a->sym = n->sym;
+		a->sym = linksym(n->sym);
 		a->offset = n->xoffset;
 		break;
 
@@ -2232,20 +2214,22 @@ naddr(Node *n, Addr *a, int canemitcode)
 		a->etype = n->left->type->etype;
 		a->width = n->left->type->width;
 		a->offset = n->xoffset;
-		a->sym = n->left->sym;
+		a->sym = linksym(n->left->sym);
 		a->type = D_PARAM;
 		a->node = n->left->orig;
 		break;
 
 	case OCLOSUREVAR:
+		if(!curfn->needctxt)
+			fatal("closurevar without needctxt");
 		a->type = D_DX+D_INDIR;
 		a->offset = n->xoffset;
-		a->sym = S;
+		a->sym = nil;
 		break;
 
 	case OCFUNC:
 		naddr(n->left, a, canemitcode);
-		a->sym = n->left->sym;
+		a->sym = linksym(n->left->sym);
 		break;
 
 	case ONAME:
@@ -2257,17 +2241,17 @@ naddr(Node *n, Addr *a, int canemitcode)
 			a->width = n->type->width;
 		}
 		a->offset = n->xoffset;
-		a->sym = n->sym;
+		s = n->sym;
 		a->node = n->orig;
 		//if(a->node >= (Node*)&n)
 		//	fatal("stack node");
-		if(a->sym == S)
-			a->sym = lookup(".noname");
+		if(s == S)
+			s = lookup(".noname");
 		if(n->method) {
 			if(n->type != T)
 			if(n->type->sym != S)
 			if(n->type->sym->pkg != nil)
-				a->sym = pkglookup(a->sym->name, n->type->sym->pkg);
+				s = pkglookup(s->name, n->type->sym->pkg);
 		}
 
 		switch(n->class) {
@@ -2286,9 +2270,10 @@ naddr(Node *n, Addr *a, int canemitcode)
 		case PFUNC:
 			a->index = D_EXTERN;
 			a->type = D_ADDR;
-			a->sym = funcsym(a->sym);
+			s = funcsym(s);
 			break;
 		}
+		a->sym = linksym(s);
 		break;
 
 	case OLITERAL:
@@ -2302,7 +2287,7 @@ naddr(Node *n, Addr *a, int canemitcode)
 			break;
 		case CTINT:
 		case CTRUNE:
-			a->sym = S;
+			a->sym = nil;
 			a->type = D_CONST;
 			a->offset = mpgetfix(n->val.u.xval);
 			break;
@@ -2310,12 +2295,12 @@ naddr(Node *n, Addr *a, int canemitcode)
 			datagostring(n->val.u.sval, a);
 			break;
 		case CTBOOL:
-			a->sym = S;
+			a->sym = nil;
 			a->type = D_CONST;
 			a->offset = n->val.u.bval;
 			break;
 		case CTNIL:
-			a->sym = S;
+			a->sym = nil;
 			a->type = D_CONST;
 			a->offset = 0;
 			break;
@@ -2344,8 +2329,16 @@ naddr(Node *n, Addr *a, int canemitcode)
 			break;	// len(nil)
 		a->etype = tptr;
 		a->width = widthptr;
-		if(a->offset >= unmappedzero && a->offset-Array_nel < unmappedzero)
-			checkoffset(a, canemitcode);
+		break;
+
+	case OSPTR:
+		// pointer in a string or slice
+		naddr(n->left, a, canemitcode);
+		if(a->type == D_CONST && a->offset == 0)
+			break;	// ptr(nil)
+		a->etype = simtype[tptr];
+		a->offset += Array_array;
+		a->width = widthptr;
 		break;
 
 	case OLEN:
@@ -2356,8 +2349,6 @@ naddr(Node *n, Addr *a, int canemitcode)
 		a->etype = TUINT32;
 		a->offset += Array_nel;
 		a->width = 4;
-		if(a->offset >= unmappedzero && a->offset-Array_nel < unmappedzero)
-			checkoffset(a, canemitcode);
 		break;
 
 	case OCAP:
@@ -2368,8 +2359,6 @@ naddr(Node *n, Addr *a, int canemitcode)
 		a->etype = TUINT32;
 		a->offset += Array_cap;
 		a->width = 4;
-		if(a->offset >= unmappedzero && a->offset-Array_nel < unmappedzero)
-			checkoffset(a, canemitcode);
 		break;
 
 //	case OADD:

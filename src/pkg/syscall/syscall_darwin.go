@@ -12,7 +12,28 @@
 
 package syscall
 
-import "unsafe"
+import (
+	errorspkg "errors"
+	"unsafe"
+)
+
+const ImplementsGetwd = true
+
+func Getwd() (string, error) {
+	buf := make([]byte, 2048)
+	attrs, err := getAttrList(".", attrList{CommonAttr: attrCmnFullpath}, buf, 0)
+	if err == nil && len(attrs) == 1 && len(attrs[0]) >= 2 {
+		wd := string(attrs[0])
+		// Sanity check that it's an absolute path and ends
+		// in a null byte, which we then strip.
+		if wd[0] == '/' && wd[len(wd)-1] == 0 {
+			return wd[:len(wd)-1], nil
+		}
+	}
+	// If pkg/os/getwd.go gets ENOTSUP, it will fall back to the
+	// slow algorithm.
+	return "", ENOTSUP
+}
 
 type SockaddrDatalink struct {
 	Len    uint8
@@ -86,6 +107,76 @@ func ParseDirent(buf []byte, max int, names []string) (consumed int, count int, 
 func PtraceAttach(pid int) (err error) { return ptrace(PT_ATTACH, pid, 0, 0) }
 func PtraceDetach(pid int) (err error) { return ptrace(PT_DETACH, pid, 0, 0) }
 
+const (
+	attrBitMapCount = 5
+	attrCmnFullpath = 0x08000000
+)
+
+type attrList struct {
+	bitmapCount uint16
+	_           uint16
+	CommonAttr  uint32
+	VolAttr     uint32
+	DirAttr     uint32
+	FileAttr    uint32
+	Forkattr    uint32
+}
+
+func getAttrList(path string, attrList attrList, attrBuf []byte, options uint) (attrs [][]byte, err error) {
+	if len(attrBuf) < 4 {
+		return nil, errorspkg.New("attrBuf too small")
+	}
+	attrList.bitmapCount = attrBitMapCount
+
+	var _p0 *byte
+	_p0, err = BytePtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+
+	_, _, e1 := Syscall6(
+		SYS_GETATTRLIST,
+		uintptr(unsafe.Pointer(_p0)),
+		uintptr(unsafe.Pointer(&attrList)),
+		uintptr(unsafe.Pointer(&attrBuf[0])),
+		uintptr(len(attrBuf)),
+		uintptr(options),
+		0,
+	)
+	if e1 != 0 {
+		return nil, e1
+	}
+	size := *(*uint32)(unsafe.Pointer(&attrBuf[0]))
+
+	// dat is the section of attrBuf that contains valid data,
+	// without the 4 byte length header. All attribute offsets
+	// are relative to dat.
+	dat := attrBuf
+	if int(size) < len(attrBuf) {
+		dat = dat[:size]
+	}
+	dat = dat[4:] // remove length prefix
+
+	for i := uint32(0); int(i) < len(dat); {
+		header := dat[i:]
+		if len(header) < 8 {
+			return attrs, errorspkg.New("truncated attribute header")
+		}
+		datOff := *(*int32)(unsafe.Pointer(&header[0]))
+		attrLen := *(*uint32)(unsafe.Pointer(&header[4]))
+		if datOff < 0 || uint32(datOff)+attrLen > uint32(len(dat)) {
+			return attrs, errorspkg.New("truncated results; attrBuf too small")
+		}
+		end := uint32(datOff) + attrLen
+		attrs = append(attrs, dat[datOff:end])
+		i = end
+		if r := i % 4; r != 0 {
+			i += (4 - r)
+		}
+	}
+	return
+}
+
 //sysnb pipe() (r int, w int, err error)
 
 func Pipe(p []int) (err error) {
@@ -96,9 +187,19 @@ func Pipe(p []int) (err error) {
 	return
 }
 
-// TODO
-func sendfile(outfd int, infd int, offset *int64, count int) (written int, err error) {
-	return -1, ENOSYS
+func Getfsstat(buf []Statfs_t, flags int) (n int, err error) {
+	var _p0 unsafe.Pointer
+	var bufsize uintptr
+	if len(buf) > 0 {
+		_p0 = unsafe.Pointer(&buf[0])
+		bufsize = unsafe.Sizeof(Statfs_t{}) * uintptr(len(buf))
+	}
+	r0, _, e1 := Syscall(SYS_GETFSSTAT64, uintptr(_p0), bufsize, uintptr(flags))
+	n = int(r0)
+	if e1 != 0 {
+		err = e1
+	}
+	return
 }
 
 /*
@@ -138,7 +239,6 @@ func Kill(pid int, signum Signal) (err error) { return kill(pid, int(signum), 1)
 //sys	Getdtablesize() (size int)
 //sysnb	Getegid() (egid int)
 //sysnb	Geteuid() (uid int)
-//sys	Getfsstat(buf []Statfs_t, flags int) (n int, err error) = SYS_GETFSSTAT64
 //sysnb	Getgid() (gid int)
 //sysnb	Getpgid(pid int) (pgid int, err error)
 //sysnb	Getpgrp() (pgrp int)
@@ -158,6 +258,11 @@ func Kill(pid int, signum Signal) (err error) { return kill(pid, int(signum), 1)
 //sys	Mkdir(path string, mode uint32) (err error)
 //sys	Mkfifo(path string, mode uint32) (err error)
 //sys	Mknod(path string, mode uint32, dev int) (err error)
+//sys	Mlock(b []byte) (err error)
+//sys	Mlockall(flags int) (err error)
+//sys	Mprotect(b []byte, prot int) (err error)
+//sys	Munlock(b []byte) (err error)
+//sys	Munlockall() (err error)
 //sys	Open(path string, mode int, perm uint32) (fd int, err error)
 //sys	Pathconf(path string, name int) (val int, err error)
 //sys	Pread(fd int, p []byte, offset int64) (n int, err error)

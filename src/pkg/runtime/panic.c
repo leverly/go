@@ -6,110 +6,70 @@
 #include "arch_GOARCH.h"
 #include "stack.h"
 #include "malloc.h"
+#include "../../cmd/ld/textflag.h"
 
 // Code related to defer, panic and recover.
 
 uint32 runtime·panicking;
 static Lock paniclk;
 
-enum
-{
-	DeferChunkSize = 2048
-};
+// Each P holds pool for defers with arg sizes 8, 24, 40, 56 and 72 bytes.
+// Memory block is 40 (24 for 32 bits) bytes larger due to Defer header.
+// This maps exactly to malloc size classes.
 
-// Allocate a Defer, usually as part of the larger frame of deferred functions.
-// Each defer must be released with both popdefer and freedefer.
+// defer size class for arg size sz
+#define DEFERCLASS(sz) (((sz)+7)>>4)
+// total size of memory block for defer with arg size sz
+#define TOTALSIZE(sz) (sizeof(Defer) - sizeof(((Defer*)nil)->args) + ROUND(sz, sizeof(uintptr)))
+
+// Allocate a Defer, usually using per-P pool.
+// Each defer must be released with freedefer.
 static Defer*
 newdefer(int32 siz)
 {
-	int32 total;
-	DeferChunk *c;
+	int32 total, sc;
 	Defer *d;
-	
-	c = g->dchunk;
-	total = sizeof(*d) + ROUND(siz, sizeof(uintptr)) - sizeof(d->args);
-	if(c == nil || total > DeferChunkSize - c->off) {
-		if(total > DeferChunkSize / 2) {
-			// Not worth putting in any chunk.
-			// Allocate a separate block.
-			d = runtime·malloc(total);
-			d->siz = siz;
-			d->special = 1;
-			d->free = 1;
-			d->link = g->defer;
-			g->defer = d;
-			return d;
-		}
+	P *p;
 
-		// Cannot fit in current chunk.
-		// Switch to next chunk, allocating if necessary.
-		c = g->dchunknext;
-		if(c == nil)
-			c = runtime·malloc(DeferChunkSize);
-		c->prev = g->dchunk;
-		c->off = sizeof(*c);
-		g->dchunk = c;
-		g->dchunknext = nil;
+	d = nil;
+	sc = DEFERCLASS(siz);
+	if(sc < nelem(p->deferpool)) {
+		p = m->p;
+		d = p->deferpool[sc];
+		if(d)
+			p->deferpool[sc] = d->link;
 	}
-
-	d = (Defer*)((byte*)c + c->off);
-	c->off += total;
+	if(d == nil) {
+		// deferpool is empty or just a big defer
+		total = TOTALSIZE(siz);
+		d = runtime·malloc(total);
+	}
 	d->siz = siz;
 	d->special = 0;
-	d->free = 0;
 	d->link = g->defer;
 	g->defer = d;
-	return d;	
-}
-
-// Pop the current defer from the defer stack.
-// Its contents are still valid until the goroutine begins executing again.
-// In particular it is safe to call reflect.call(d->fn, d->argp, d->siz) after
-// popdefer returns.
-static void
-popdefer(void)
-{
-	Defer *d;
-	DeferChunk *c;
-	int32 total;
-	
-	d = g->defer;
-	if(d == nil)
-		runtime·throw("runtime: popdefer nil");
-	g->defer = d->link;
-	if(d->special) {
-		// Nothing else to do.
-		return;
-	}
-	total = sizeof(*d) + ROUND(d->siz, sizeof(uintptr)) - sizeof(d->args);
-	c = g->dchunk;
-	if(c == nil || (byte*)d+total != (byte*)c+c->off)
-		runtime·throw("runtime: popdefer phase error");
-	c->off -= total;
-	if(c->off == sizeof(*c)) {
-		// Chunk now empty, so pop from stack.
-		// Save in dchunknext both to help with pingponging between frames
-		// and to make sure d is still valid on return.
-		if(g->dchunknext != nil)
-			runtime·free(g->dchunknext);
-		g->dchunknext = c;
-		g->dchunk = c->prev;
-	}
+	return d;
 }
 
 // Free the given defer.
-// For defers in the per-goroutine chunk this just clears the saved arguments.
-// For large defers allocated on the heap, this frees them.
 // The defer cannot be used after this call.
 static void
 freedefer(Defer *d)
 {
-	if(d->special) {
-		if(d->free)
-			runtime·free(d);
-	} else {
-		runtime·memclr((byte*)d->args, d->siz);
-	}
+	int32 sc;
+	P *p;
+
+	if(d->special)
+		return;
+	sc = DEFERCLASS(d->siz);
+	if(sc < nelem(p->deferpool)) {
+		p = m->p;
+		d->link = p->deferpool[sc];
+		p->deferpool[sc] = d;
+		// No need to wipe out pointers in argp/pc/fn/args,
+		// because we empty the pool before GC.
+	} else
+		runtime·free(d);
 }
 
 // Create a new deferred function fn with siz bytes of arguments.
@@ -118,7 +78,7 @@ freedefer(Defer *d)
 // are available sequentially after &fn; they would not be
 // copied if a stack split occurred.  It's OK for this to call
 // functions that split the stack.
-#pragma textflag 7
+#pragma textflag NOSPLIT
 uintptr
 runtime·deferproc(int32 siz, FuncVal *fn, ...)
 {
@@ -152,7 +112,10 @@ runtime·deferproc(int32 siz, FuncVal *fn, ...)
 // is called again and again until there are no more deferred functions.
 // Cannot split the stack because we reuse the caller's frame to
 // call the deferred function.
-#pragma textflag 7
+
+// The single argument isn't actually used - it just has its address
+// taken so it can be matched against pending defers.
+#pragma textflag NOSPLIT
 void
 runtime·deferreturn(uintptr arg0)
 {
@@ -166,11 +129,51 @@ runtime·deferreturn(uintptr arg0)
 	argp = (byte*)&arg0;
 	if(d->argp != argp)
 		return;
+
+	// Moving arguments around.
+	// Do not allow preemption here, because the garbage collector
+	// won't know the form of the arguments until the jmpdefer can
+	// flip the PC over to fn.
+	m->locks++;
 	runtime·memmove(argp, d->args, d->siz);
 	fn = d->fn;
-	popdefer();
+	g->defer = d->link;
 	freedefer(d);
+	m->locks--;
+	if(m->locks == 0 && g->preempt)
+		g->stackguard0 = StackPreempt;
 	runtime·jmpdefer(fn, argp);
+}
+
+// Ensure that defer arg sizes that map to the same defer size class
+// also map to the same malloc size class.
+void
+runtime·testdefersizes(void)
+{
+	P *p;
+	int32 i, siz, defersc, mallocsc;
+	int32 map[nelem(p->deferpool)];
+
+	for(i=0; i<nelem(p->deferpool); i++)
+		map[i] = -1;
+	for(i=0;; i++) {
+		defersc = DEFERCLASS(i);
+		if(defersc >= nelem(p->deferpool))
+			break;
+		siz = TOTALSIZE(i);
+		mallocsc = runtime·SizeToClass(siz);
+		siz = runtime·class_to_size[mallocsc];
+		// runtime·printf("defer class %d: arg size %d, block size %d(%d)\n", defersc, i, siz, mallocsc);
+		if(map[defersc] < 0) {
+			map[defersc] = mallocsc;
+			continue;
+		}
+		if(map[defersc] != mallocsc) {
+			runtime·printf("bad defer size class: i=%d siz=%d mallocsc=%d/%d\n",
+				i, siz, map[defersc], mallocsc);
+			runtime·throw("bad defer size class");
+		}
+	}
 }
 
 // Run all deferred functions for the current goroutine.
@@ -180,8 +183,8 @@ rundefer(void)
 	Defer *d;
 
 	while((d = g->defer) != nil) {
-		popdefer();
-		reflect·call(d->fn, (byte*)d->args, d->siz);
+		g->defer = d->link;
+		reflect·call(d->fn, (byte*)d->args, d->siz, d->siz);
 		freedefer(d);
 	}
 }
@@ -202,37 +205,65 @@ printpanics(Panic *p)
 }
 
 static void recovery(G*);
+static void abortpanic(Panic*);
+static FuncVal abortpanicV = { (void(*)(void))abortpanic };
 
 // The implementation of the predeclared function panic.
 void
 runtime·panic(Eface e)
 {
-	Defer *d;
-	Panic *p;
+	Defer *d, dabort;
+	Panic p;
 	void *pc, *argp;
-	
-	p = runtime·mal(sizeof *p);
-	p->arg = e;
-	p->link = g->panic;
-	p->stackbase = (byte*)g->stackbase;
-	g->panic = p;
+
+	runtime·memclr((byte*)&p, sizeof p);
+	p.arg = e;
+	p.link = g->panic;
+	p.stackbase = g->stackbase;
+	g->panic = &p;
+
+	dabort.fn = &abortpanicV;
+	dabort.siz = sizeof(&p);
+	dabort.args[0] = &p;
+	dabort.argp = NoArgs;
+	dabort.special = true;
 
 	for(;;) {
 		d = g->defer;
 		if(d == nil)
 			break;
 		// take defer off list in case of recursive panic
-		popdefer();
-		g->ispanic = true;	// rock for newstack, where reflect.call ends up
+		g->defer = d->link;
+		g->ispanic = true;	// rock for runtime·newstack, where runtime·newstackcall ends up
 		argp = d->argp;
 		pc = d->pc;
-		reflect·call(d->fn, (byte*)d->args, d->siz);
+
+		// The deferred function may cause another panic,
+		// so newstackcall may not return. Set up a defer
+		// to mark this panic aborted if that happens.
+		dabort.link = g->defer;
+		g->defer = &dabort;
+		p.defer = d;
+
+		runtime·newstackcall(d->fn, (byte*)d->args, d->siz);
+
+		// Newstackcall did not panic. Remove dabort.
+		if(g->defer != &dabort)
+			runtime·throw("bad defer entry in panic");
+		g->defer = dabort.link;
+
 		freedefer(d);
-		if(p->recovered) {
-			g->panic = p->link;
+		if(p.recovered) {
+			g->panic = p.link;
+			// Aborted panics are marked but remain on the g->panic list.
+			// Recovery will unwind the stack frames containing their Panic structs.
+			// Remove them from the list and free the associated defers.
+			while(g->panic && g->panic->aborted) {
+				freedefer(g->panic->defer);
+				g->panic = g->panic->link;
+			}
 			if(g->panic == nil)	// must be done with signal
 				g->sig = 0;
-			runtime·free(p);
 			// Pass information about recovering frame to recovery.
 			g->sigcode0 = (uintptr)argp;
 			g->sigcode1 = (uintptr)pc;
@@ -244,7 +275,14 @@ runtime·panic(Eface e)
 	// ran out of deferred calls - old-school panic now
 	runtime·startpanic();
 	printpanics(g->panic);
-	runtime·dopanic(0);
+	runtime·dopanic(0);	// should not return
+	runtime·exit(1);	// not reached
+}
+
+static void
+abortpanic(Panic *p)
+{
+	p->aborted = true;
 }
 
 // Unwind the stack after a deferred function calls recover
@@ -254,11 +292,11 @@ static void
 recovery(G *gp)
 {
 	void *argp;
-	void *pc;
+	uintptr pc;
 	
 	// Info about defer passed in G struct.
 	argp = (void*)gp->sigcode0;
-	pc = (void*)gp->sigcode1;
+	pc = (uintptr)gp->sigcode1;
 
 	// Unwind to the stack frame with d's arguments in it.
 	runtime·unwindstack(gp, argp);
@@ -277,7 +315,9 @@ recovery(G *gp)
 	else
 		gp->sched.sp = (uintptr)argp - 2*sizeof(uintptr);
 	gp->sched.pc = pc;
-	runtime·gogo(&gp->sched, 1);
+	gp->sched.lr = 0;
+	gp->sched.ret = 1;
+	runtime·gogo(&gp->sched);
 }
 
 // Free stack frames until we hit the last one
@@ -292,14 +332,14 @@ runtime·unwindstack(G *gp, byte *sp)
 	if(g == gp)
 		runtime·throw("unwindstack on self");
 
-	while((top = (Stktop*)gp->stackbase) != nil && top->stackbase != nil) {
+	while((top = (Stktop*)gp->stackbase) != 0 && top->stackbase != 0) {
 		stk = (byte*)gp->stackguard - StackGuard;
 		if(stk <= sp && sp < (byte*)gp->stackbase)
 			break;
-		gp->stackbase = (uintptr)top->stackbase;
-		gp->stackguard = (uintptr)top->stackguard;
-		if(top->free != 0)
-			runtime·stackfree(stk, top->free);
+		gp->stackbase = top->stackbase;
+		gp->stackguard = top->stackguard;
+		gp->stackguard0 = gp->stackguard;
+		runtime·stackfree(gp, stk, top);
 	}
 
 	if(sp != nil && (sp < (byte*)gp->stackguard - StackGuard || (byte*)gp->stackbase < sp)) {
@@ -311,91 +351,71 @@ runtime·unwindstack(G *gp, byte *sp)
 // The implementation of the predeclared function recover.
 // Cannot split the stack because it needs to reliably
 // find the stack segment of its caller.
-#pragma textflag 7
+#pragma textflag NOSPLIT
 void
-runtime·recover(byte *argp, Eface ret)
+runtime·recover(byte *argp, GoOutput retbase, ...)
 {
-	Stktop *top, *oldtop;
 	Panic *p;
+	Stktop *top;
+	Eface *ret;
 
-	// Must be a panic going on.
-	if((p = g->panic) == nil || p->recovered)
-		goto nomatch;
-
-	// Frame must be at the top of the stack segment,
-	// because each deferred call starts a new stack
-	// segment as a side effect of using reflect.call.
-	// (There has to be some way to remember the
-	// variable argument frame size, and the segment
-	// code already takes care of that for us, so we
-	// reuse it.)
-	//
-	// As usual closures complicate things: the fp that
-	// the closure implementation function claims to have
-	// is where the explicit arguments start, after the
-	// implicit pointer arguments and PC slot.
-	// If we're on the first new segment for a closure,
-	// then fp == top - top->args is correct, but if
-	// the closure has its own big argument frame and
-	// allocated a second segment (see below),
-	// the fp is slightly above top - top->args.
-	// That condition can't happen normally though
-	// (stack pointers go down, not up), so we can accept
-	// any fp between top and top - top->args as
-	// indicating the top of the segment.
+	// Must be an unrecovered panic in progress.
+	// Must be on a stack segment created for a deferred call during a panic.
+	// Must be at the top of that segment, meaning the deferred call itself
+	// and not something it called. The top frame in the segment will have
+	// argument pointer argp == top - top->argsize.
+	// The subtraction of g->panicwrap allows wrapper functions that
+	// do not count as official calls to adjust what we consider the top frame
+	// while they are active on the stack. The linker emits adjustments of
+	// g->panicwrap in the prologue and epilogue of functions marked as wrappers.
+	ret = (Eface*)&retbase;
 	top = (Stktop*)g->stackbase;
-	if(argp < (byte*)top - top->argsize || (byte*)top < argp)
-		goto nomatch;
-
-	// The deferred call makes a new segment big enough
-	// for the argument frame but not necessarily big
-	// enough for the function's local frame (size unknown
-	// at the time of the call), so the function might have
-	// made its own segment immediately.  If that's the
-	// case, back top up to the older one, the one that
-	// reflect.call would have made for the panic.
-	//
-	// The fp comparison here checks that the argument
-	// frame that was copied during the split (the top->args
-	// bytes above top->fp) abuts the old top of stack.
-	// This is a correct test for both closure and non-closure code.
-	oldtop = (Stktop*)top->stackbase;
-	if(oldtop != nil && top->argp == (byte*)oldtop - top->argsize)
-		top = oldtop;
-
-	// Now we have the segment that was created to
-	// run this call.  It must have been marked as a panic segment.
-	if(!top->panic)
-		goto nomatch;
-
-	// Okay, this is the top frame of a deferred call
-	// in response to a panic.  It can see the panic argument.
-	p->recovered = 1;
-	ret = p->arg;
-	FLUSH(&ret);
-	return;
-
-nomatch:
-	ret.type = nil;
-	ret.data = nil;
-	FLUSH(&ret);
+	p = g->panic;
+	if(p != nil && !p->recovered && top->panic && argp == (byte*)top - top->argsize - g->panicwrap) {
+		p->recovered = 1;
+		*ret = p->arg;
+	} else {
+		ret->type = nil;
+		ret->data = nil;
+	}
 }
 
 void
 runtime·startpanic(void)
 {
-	if(runtime·mheap == 0 || runtime·mheap->cachealloc.size == 0) { // very early
+	if(runtime·mheap.cachealloc.size == 0) { // very early
 		runtime·printf("runtime: panic before malloc heap initialized\n");
 		m->mallocing = 1; // tell rest of panic not to try to malloc
 	} else if(m->mcache == nil) // can happen if called from signal handler or throw
 		m->mcache = runtime·allocmcache();
-	if(m->dying) {
+	switch(m->dying) {
+	case 0:
+		m->dying = 1;
+		if(g != nil)
+			g->writebuf = nil;
+		runtime·xadd(&runtime·panicking, 1);
+		runtime·lock(&paniclk);
+		if(runtime·debug.schedtrace > 0 || runtime·debug.scheddetail > 0)
+			runtime·schedtrace(true);
+		runtime·freezetheworld();
+		return;
+	case 1:
+		// Something failed while panicing, probably the print of the
+		// argument to panic().  Just print a stack trace and exit.
+		m->dying = 2;
 		runtime·printf("panic during panic\n");
+		runtime·dopanic(0);
 		runtime·exit(3);
+	case 2:
+		// This is a genuine bug in the runtime, we couldn't even
+		// print the stack trace successfully.
+		m->dying = 3;
+		runtime·printf("stack trace unavailable\n");
+		runtime·exit(4);
+	default:
+		// Can't even print!  Just exit.
+		runtime·exit(5);
 	}
-	m->dying = 1;
-	runtime·xadd(&runtime·panicking, 1);
-	runtime·lock(&paniclk);
 }
 
 void
@@ -403,16 +423,20 @@ runtime·dopanic(int32 unused)
 {
 	static bool didothers;
 	bool crash;
+	int32 t;
 
 	if(g->sig != 0)
 		runtime·printf("[signal %x code=%p addr=%p pc=%p]\n",
 			g->sig, g->sigcode0, g->sigcode1, g->sigpc);
 
-	if(runtime·gotraceback(&crash)){
+	if((t = runtime·gotraceback(&crash)) > 0){
 		if(g != m->g0) {
 			runtime·printf("\n");
 			runtime·goroutineheader(g);
-			runtime·traceback(runtime·getcallerpc(&unused), runtime·getcallersp(&unused), 0, g);
+			runtime·traceback((uintptr)runtime·getcallerpc(&unused), (uintptr)runtime·getcallersp(&unused), 0, g);
+		} else if(t >= 2 || m->throwing > 0) {
+			runtime·printf("\nruntime stack:\n");
+			runtime·traceback((uintptr)runtime·getcallerpc(&unused), (uintptr)runtime·getcallersp(&unused), 0, g);
 		}
 		if(!didothers) {
 			didothers = true;
@@ -462,6 +486,29 @@ runtime·throwinit(void)
 	runtime·throw("recursive call during initialization - linker skew");
 }
 
+bool
+runtime·canpanic(G *gp)
+{
+	byte g;
+
+	USED(&g);  // don't use global g, it points to gsignal
+
+	// Is it okay for gp to panic instead of crashing the program?
+	// Yes, as long as it is running Go code, not runtime code,
+	// and not stuck in a system call.
+	if(gp == nil || gp != m->curg)
+		return false;
+	if(m->locks-m->softfloat != 0 || m->mallocing != 0 || m->throwing != 0 || m->gcing != 0 || m->dying != 0)
+		return false;
+	if(gp->status != Grunning || gp->syscallsp != 0)
+		return false;
+#ifdef GOOS_windows
+	if(m->libcallsp != 0)
+		return false;
+#endif
+	return true;
+}
+
 void
 runtime·throw(int8 *s)
 {
@@ -479,11 +526,29 @@ runtime·panicstring(int8 *s)
 {
 	Eface err;
 
+	// m->softfloat is set during software floating point,
+	// which might cause a fault during a memory load.
+	// It increments m->locks to avoid preemption.
+	// If we're panicking, the software floating point frames
+	// will be unwound, so decrement m->locks as they would.
+	if(m->softfloat) {
+		m->locks--;
+		m->softfloat = 0;
+	}
+
+	if(m->mallocing) {
+		runtime·printf("panic: %s\n", s);
+		runtime·throw("panic during malloc");
+	}
 	if(m->gcing) {
 		runtime·printf("panic: %s\n", s);
 		runtime·throw("panic during gc");
 	}
-	runtime·newErrorString(runtime·gostringnocopy((byte*)s), &err);
+	if(m->locks) {
+		runtime·printf("panic: %s\n", s);
+		runtime·throw("panic holding locks");
+	}
+	runtime·newErrorCString(s, &err);
 	runtime·panic(err);
 }
 
@@ -492,4 +557,10 @@ runtime·Goexit(void)
 {
 	rundefer();
 	runtime·goexit();
+}
+
+void
+runtime·panicdivide(void)
+{
+	runtime·panicstring("integer divide by zero");
 }

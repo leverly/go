@@ -130,7 +130,7 @@ dumpdcl(char *st)
 		}
 		print(" '%s'", d->name);
 		s = pkglookup(d->name, d->pkg);
-		print(" %lS\n", s);
+		print(" %S\n", s);
 	}
 }
 
@@ -141,6 +141,8 @@ testdclstack(void)
 
 	for(d=dclstack; d!=S; d=d->link) {
 		if(d->name == nil) {
+			if(nerrors != 0)
+				errorexit();
 			yyerror("mark left on the stack");
 			continue;
 		}
@@ -287,7 +289,7 @@ variter(NodeList *vl, Node *t, NodeList *el)
 	for(; vl; vl=vl->next) {
 		if(doexpr) {
 			if(el == nil) {
-				yyerror("missing expr in var dcl");
+				yyerror("missing expression in var declaration");
 				break;
 			}
 			e = el->n;
@@ -310,7 +312,7 @@ variter(NodeList *vl, Node *t, NodeList *el)
 		}
 	}
 	if(el != nil)
-		yyerror("extra expr in var dcl");
+		yyerror("extra expression in var declaration");
 	return init;
 }
 
@@ -327,7 +329,7 @@ constiter(NodeList *vl, Node *t, NodeList *cl)
 	vv = nil;
 	if(cl == nil) {
 		if(t != N)
-			yyerror("constdcl cannot have type without expr");
+			yyerror("const declaration cannot have type without expression");
 		cl = lastconst;
 		t = lasttype;
 	} else {
@@ -338,7 +340,7 @@ constiter(NodeList *vl, Node *t, NodeList *cl)
 
 	for(; vl; vl=vl->next) {
 		if(cl == nil) {
-			yyerror("missing expr in const dcl");
+			yyerror("missing value in const declaration");
 			break;
 		}
 		c = cl->n;
@@ -354,7 +356,7 @@ constiter(NodeList *vl, Node *t, NodeList *cl)
 		vv = list(vv, nod(ODCLCONST, v, N));
 	}
 	if(cl != nil)
-		yyerror("extra expr in const dcl");
+		yyerror("extra expression in const declaration");
 	iota += 1;
 	return vv;
 }
@@ -641,8 +643,8 @@ funcargs(Node *nt)
 			fatal("funcargs out %O", n->op);
 
 		if(n->left == N) {
-			// give it a name so escape analysis has nodes to work with
-			snprint(namebuf, sizeof(namebuf), "~anon%d", gen++);
+			// Name so that escape analysis can track it. ~r stands for 'result'.
+			snprint(namebuf, sizeof(namebuf), "~r%d", gen++);
 			n->left = newname(lookup(namebuf));
 			// TODO: n->left->missing = 1;
 		} 
@@ -650,14 +652,20 @@ funcargs(Node *nt)
 		n->left->op = ONAME;
 
 		if(isblank(n->left)) {
-			// Give it a name so we can assign to it during return.
-			// preserve the original in ->orig
+			// Give it a name so we can assign to it during return. ~b stands for 'blank'.
+			// The name must be different from ~r above because if you have
+			//	func f() (_ int)
+			//	func g() int
+			// f is allowed to use a plain 'return' with no arguments, while g is not.
+			// So the two cases must be distinguished.
+			// We do not record a pointer to the original node (n->orig).
+			// Having multiple names causes too much confusion in later passes.
 			nn = nod(OXXX, N, N);
 			*nn = *n->left;
+			nn->orig = nn;
+			snprint(namebuf, sizeof(namebuf), "~b%d", gen++);
+			nn->sym = lookup(namebuf);
 			n->left = nn;
-			
-			snprint(namebuf, sizeof(namebuf), "~anon%d", gen++);
-			n->left->sym = lookup(namebuf);
 		}
 
 		n->left->ntype = n->right;
@@ -939,8 +947,6 @@ interfacefield(Node *n)
 				f->nname = n->left;
 				f->embedded = n->embedded;
 				f->sym = f->nname->sym;
-				if(importpkg && !exportname(f->sym->name))
-					f->sym = pkglookup(f->sym->name, structpkg);
 			}
 
 		} else {
@@ -1019,7 +1025,7 @@ tointerface(NodeList *l)
 }
 
 Node*
-embedded(Sym *s)
+embedded(Sym *s, Pkg *pkg)
 {
 	Node *n;
 	char *name;
@@ -1036,9 +1042,9 @@ embedded(Sym *s)
 
 	if(exportname(name))
 		n = newname(lookup(name));
-	else if(s->pkg == builtinpkg && importpkg != nil)
-		// The name of embedded builtins during imports belongs to importpkg.
-		n = newname(pkglookup(name, importpkg));
+	else if(s->pkg == builtinpkg)
+		// The name of embedded builtins belongs to pkg.
+		n = newname(pkglookup(name, pkg));
 	else
 		n = newname(pkglookup(name, s->pkg));
 	n = nod(ODCLFIELD, n, oldname(s));
@@ -1209,7 +1215,7 @@ functype(Node *this, NodeList *in, NodeList *out)
 	t->outnamed = 0;
 	if(t->outtuple > 0 && out->n->left != N && out->n->left->orig != N) {
 		s = out->n->left->orig->sym;
-		if(s != S && s->name[0] != '~')
+		if(s != S && (s->name[0] != '~' || s->name[1] != 'r')) // ~r%d is the name invented for an unnamed result
 			t->outnamed = 1;
 	}
 
@@ -1432,6 +1438,8 @@ funccompile(Node *n, int isclosure)
 	
 	// record offset to actual frame pointer.
 	// for closure, have to skip over leading pointers and PC slot.
+	// TODO(rsc): this is the old jit closure handling code.
+	// with the new closures, isclosure is always 0; delete this block.
 	nodfp->xoffset = 0;
 	if(isclosure) {
 		NodeList *l;

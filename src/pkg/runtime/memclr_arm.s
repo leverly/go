@@ -23,12 +23,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#include "../../cmd/ld/textflag.h"
+
 TO = 8
 TOE = 11
 N = 12
 TMP = 12				/* N and TMP don't overlap */
 
-TEXT runtime·memclr(SB),7,$0
+TEXT runtime·memclr(SB),NOSPLIT,$0-8
 	MOVW	ptr+0(FP), R(TO)
 	MOVW	n+4(FP), R(N)
 	MOVW	$0, R(0)
@@ -37,12 +39,6 @@ TEXT runtime·memclr(SB),7,$0
 
 	CMP	$4, R(N)		/* need at least 4 bytes to copy */
 	BLT	_1tail
-
-	AND	$0xFF, R(0)		/* it's a byte */
-	SLL	$8, R(0), R(TMP)	/* replicate to a word */
-	ORR	R(TMP), R(0)
-	SLL	$16, R(0), R(TMP)
-	ORR	R(TMP), R(0)
 
 _4align:				/* align on 4 */
 	AND.S	$3, R(TO), R(TMP)

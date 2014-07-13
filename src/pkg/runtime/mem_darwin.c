@@ -9,14 +9,14 @@
 #include "malloc.h"
 
 void*
-runtime·SysAlloc(uintptr n)
+runtime·SysAlloc(uintptr n, uint64 *stat)
 {
 	void *v;
 
-	mstats.sys += n;
 	v = runtime·mmap(nil, n, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
 	if(v < (void*)4096)
 		return nil;
+	runtime·xadd64(stat, n);
 	return v;
 }
 
@@ -28,17 +28,31 @@ runtime·SysUnused(void *v, uintptr n)
 }
 
 void
-runtime·SysFree(void *v, uintptr n)
+runtime·SysUsed(void *v, uintptr n)
 {
-	mstats.sys -= n;
+	USED(v);
+	USED(n);
+}
+
+void
+runtime·SysFree(void *v, uintptr n, uint64 *stat)
+{
+	runtime·xadd64(stat, -(uint64)n);
 	runtime·munmap(v, n);
 }
 
+void
+runtime·SysFault(void *v, uintptr n)
+{
+	runtime·mmap(v, n, PROT_NONE, MAP_ANON|MAP_PRIVATE|MAP_FIXED, -1, 0);
+}
+
 void*
-runtime·SysReserve(void *v, uintptr n)
+runtime·SysReserve(void *v, uintptr n, bool *reserved)
 {
 	void *p;
 
+	*reserved = true;
 	p = runtime·mmap(v, n, PROT_NONE, MAP_ANON|MAP_PRIVATE, -1, 0);
 	if(p < (void*)4096)
 		return nil;
@@ -51,11 +65,13 @@ enum
 };
 
 void
-runtime·SysMap(void *v, uintptr n)
+runtime·SysMap(void *v, uintptr n, bool reserved, uint64 *stat)
 {
 	void *p;
 	
-	mstats.sys += n;
+	USED(reserved);
+
+	runtime·xadd64(stat, n);
 	p = runtime·mmap(v, n, PROT_READ|PROT_WRITE, MAP_ANON|MAP_FIXED|MAP_PRIVATE, -1, 0);
 	if(p == (void*)ENOMEM)
 		runtime·throw("runtime: out of memory");
