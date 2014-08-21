@@ -113,9 +113,6 @@ func (d *decoder) parseIHDR(length uint32) error {
 		return err
 	}
 	d.crc.Write(d.tmp[:13])
-	if d.tmp[10] != 0 || d.tmp[11] != 0 || d.tmp[12] != 0 {
-		return UnsupportedError("compression, filter or interlace method")
-	}
 	w := int32(binary.BigEndian.Uint32(d.tmp[0:4]))
 	h := int32(binary.BigEndian.Uint32(d.tmp[4:8]))
 	if w < 0 || h < 0 {
