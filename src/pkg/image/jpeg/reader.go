@@ -134,10 +134,6 @@ func (d *decoder) processSOF(n int, configOnly bool) error {
 	default:
 		return UnsupportedError("SOF has wrong length")
 	}
-	if int(d.tmp[5]) != d.nComp {
-		return UnsupportedError("SOF has wrong number of image components")
-	}
-
 	_, err := io.ReadFull(d.r, d.tmp[:n])
 	if err != nil {
 		return err
@@ -150,6 +146,10 @@ func (d *decoder) processSOF(n int, configOnly bool) error {
 	d.width = int(d.tmp[3])<<8 + int(d.tmp[4])
 	if configOnly {
 		return nil
+	}
+
+	if int(d.tmp[5]) != d.nComp {
+		return UnsupportedError("SOF has wrong number of image components")
 	}
 
 	for i := 0; i < d.nComp; i++ {
