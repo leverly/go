@@ -1,3 +1,3 @@
 0. based on go1.3.1
 1. jpeg only get width and height info
-2. png support interlace
+2. png support interlace https://code.google.com/p/go/issues/detail?id=6293
