@@ -125,6 +125,15 @@ func (d *decoder) ignore(n int) error {
 
 // Specified in section B.2.2.
 func (d *decoder) processSOF(n int, configOnly bool) error {
+
+	switch n {
+	case 6 + 3*nGrayComponent:
+		d.nComp = nGrayComponent
+	case 6 + 3*nColorComponent:
+		d.nComp = nColorComponent
+	default:
+		return UnsupportedError("SOF has wrong length")
+	}
 	_, err := io.ReadFull(d.r, d.tmp[:n])
 	if err != nil {
 		return err
@@ -139,17 +148,10 @@ func (d *decoder) processSOF(n int, configOnly bool) error {
 		return nil
 	}
 
-	switch n {
-	case 6 + 3*nGrayComponent:
-		d.nComp = nGrayComponent
-	case 6 + 3*nColorComponent:
-		d.nComp = nColorComponent
-	default:
-		return UnsupportedError("SOF has wrong length")
-	}
 	if int(d.tmp[5]) != d.nComp {
 		return UnsupportedError("SOF has wrong number of image components")
 	}
+
 	for i := 0; i < d.nComp; i++ {
 		d.comp[i].c = d.tmp[6+3*i]
 		d.comp[i].tq = d.tmp[8+3*i]
