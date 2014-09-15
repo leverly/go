@@ -67,7 +67,7 @@ func (d *decoder) processSOS(n int) error {
 		}
 		scan[i].compIndex = uint8(compIndex)
 		scan[i].td = d.tmp[2+2*i] >> 4
-		if scan[i].td > maxTh {
+		if scan[i].td > maxTh { //fix 8693
 			return FormatError("bad Td value")
 		}
 		scan[i].ta = d.tmp[2+2*i] & 0x0f
