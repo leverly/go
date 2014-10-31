@@ -36,6 +36,11 @@
 
 #define	NREGVAR	32
 #define	REGBITS	((uint32)0xffffffff)
+/*c2go enum {
+	NREGVAR = 32,
+	REGBITS = 0xffffffff,
+};
+*/
 
 	void	addsplits(void);
 static	Reg*	firstr;
@@ -222,6 +227,10 @@ regopt(Prog *firstp)
 				for(z=0; z<BITS; z++)
 					r->set.b[z] |= bit.b[z];
 		}
+
+		/* the mod/div runtime routines smash R12 */
+		if(p->as == ADIV || p->as == ADIVU || p->as == AMOD || p->as == AMODU)
+			r->set.b[z] |= RtoB(12);
 	}
 	if(firstr == R)
 		return;
@@ -1306,6 +1315,7 @@ void
 addreg(Adr *a, int rn)
 {
 	a->sym = nil;
+	a->node = nil;
 	a->name = D_NONE;
 	a->type = D_REG;
 	a->reg = rn;

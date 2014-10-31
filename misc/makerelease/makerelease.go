@@ -30,7 +30,7 @@ import (
 	"strings"
 
 	"code.google.com/p/goauth2/oauth"
-	"code.google.com/p/google-api-go-client/storage/v1beta2"
+	storage "code.google.com/p/google-api-go-client/storage/v1beta2"
 )
 
 var (
@@ -56,8 +56,8 @@ const (
 	blogPath       = "code.google.com/p/go.blog"
 	toolPath       = "code.google.com/p/go.tools"
 	tourPath       = "code.google.com/p/go-tour"
-	defaultToolTag = "release-branch.go1.2"
-	defaultTourTag = "release-branch.go1.2"
+	defaultToolTag = "release-branch.go1.3"
+	defaultTourTag = "release-branch.go1.3"
 )
 
 // Import paths for tool commands.
@@ -74,8 +74,8 @@ var preBuildCleanFiles = []string{
 	"misc/dashboard/godashboard",
 	"src/cmd/cov",
 	"src/cmd/prof",
-	"src/pkg/exp",
-	"src/pkg/old",
+	"src/exp",
+	"src/old",
 }
 
 var cleanFiles = []string{
@@ -154,6 +154,7 @@ func main() {
 			log.Fatalln("setupOAuthClient:", err)
 		}
 	}
+	ok := true
 	for _, targ := range flag.Args() {
 		var b Build
 		if m := fileRe.FindStringSubmatch(targ); m != nil {
@@ -205,7 +206,11 @@ func main() {
 		}
 		if err := b.Do(); err != nil {
 			log.Printf("%s: %v", targ, err)
+			ok = false
 		}
+	}
+	if !ok {
+		os.Exit(1)
 	}
 }
 
@@ -432,7 +437,8 @@ func (b *Build) Do() error {
 		// Build package.
 		_, err = b.run(work, "candle",
 			"-nologo",
-			"-dVersion="+version,
+			"-dGoVersion="+version,
+			"-dWixGoVersion="+wixVersion(version),
 			"-dArch="+b.Arch,
 			"-dSourceDir=go",
 			installer, appfiles)
@@ -464,6 +470,22 @@ func (b *Build) Do() error {
 		}
 	}
 	return err
+}
+
+var versionRe = regexp.MustCompile(`^go([0-9]+(\.[0-9]+)*)`)
+
+// The Microsoft installer requires version format major.minor.build
+// (http://msdn.microsoft.com/en-us/library/aa370859%28v=vs.85%29.aspx).
+// Where the major and minor field has a maximum value of 255 and build 65535.
+// The offical Go version format is goMAJOR.MINOR.PATCH at $GOROOT/VERSION.
+// It's based on the Mercurial tag. Remove prefix and suffix to make the
+// installer happy.
+func wixVersion(v string) string {
+	m := versionRe.FindStringSubmatch(v)
+	if m == nil {
+		return "0.0.0"
+	}
+	return m[1]
 }
 
 // extras fetches the go.tools, go.blog, and go-tour repositories,
@@ -721,7 +743,7 @@ type File struct {
 func setupOAuthClient() error {
 	config := &oauth.Config{
 		ClientId:     "999119582588-h7kpj5pcm6d9solh5lgrbusmvvk4m9dn.apps.googleusercontent.com",
-		ClientSecret: "8YLFgOhXIELWbO",
+		ClientSecret: "8YLFgOhXIELWbO-NtF3iqIQz",
 		Scope:        storage.DevstorageRead_writeScope,
 		AuthURL:      "https://accounts.google.com/o/oauth2/auth",
 		TokenURL:     "https://accounts.google.com/o/oauth2/token",
