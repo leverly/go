@@ -52,7 +52,7 @@ timeout_scale=1
 [ "$GOARCH" == "arm" ] && timeout_scale=3
 
 echo '# Testing packages.'
-time go test std -short -timeout=$(expr 120 \* $timeout_scale)s
+time go test std -short -timeout=$(expr 120 \* $timeout_scale)s -gcflags "$GO_GCFLAGS"
 echo
 
 # We set GOMAXPROCS=2 in addition to -cpu=1,2,4 in order to test runtime bootstrap code,
@@ -64,10 +64,10 @@ echo
 echo '# sync -cpu=10'
 go test sync -short -timeout=$(expr 120 \* $timeout_scale)s -cpu=10
 
-# Race detector only supported on Linux and OS X,
+# Race detector only supported on Linux, FreeBSD and OS X,
 # and only on amd64, and only when cgo is enabled.
 case "$GOHOSTOS-$GOOS-$GOARCH-$CGO_ENABLED" in
-linux-linux-amd64-1 | darwin-darwin-amd64-1)
+linux-linux-amd64-1 | freebsd-freebsd-amd64-1 | darwin-darwin-amd64-1)
 	echo
 	echo '# Testing race detector.'
 	go test -race -i runtime/race flag
@@ -98,6 +98,13 @@ xcd() {
 # To avoid this bug, every command in a subshell should have '|| exit 1' on it.
 # Strictly speaking, the test may be unnecessary on the final command of
 # the subshell, but it aids later editing and may avoid future bash bugs.
+
+if [ "$GOOS" == "android" ]; then
+	# Disable cgo tests on android.
+	# They are not designed to run off the host.
+	# golang.org/issue/8345
+	CGO_ENABLED=0
+fi
 
 [ "$CGO_ENABLED" != 1 ] ||
 [ "$GOHOSTOS" == windows ] ||
@@ -130,7 +137,7 @@ darwin-386 | darwin-amd64)
 	*) go test -ldflags '-linkmode=external'  || exit 1;;
 	esac
 	;;
-dragonfly-386 | dragonfly-amd64 | freebsd-386 | freebsd-amd64 | freebsd-arm | linux-386 | linux-amd64 | linux-arm | netbsd-386 | netbsd-amd64)
+android-arm | dragonfly-386 | dragonfly-amd64 | freebsd-386 | freebsd-amd64 | freebsd-arm | linux-386 | linux-amd64 | linux-arm | netbsd-386 | netbsd-amd64)
 	go test -ldflags '-linkmode=external' || exit 1
 	go test -ldflags '-linkmode=auto' ../testtls || exit 1
 	go test -ldflags '-linkmode=external' ../testtls || exit 1
@@ -157,11 +164,19 @@ dragonfly-386 | dragonfly-amd64 | freebsd-386 | freebsd-amd64 | freebsd-arm | li
 esac
 ) || exit $?
 
-# This tests cgo -godefs. That mode is not supported,
+# This tests cgo -cdefs. That mode is not supported,
 # so it's okay if it doesn't work on some systems.
 # In particular, it works badly with clang on OS X.
+# It doesn't work at all now that we disallow C code
+# outside runtime. Once runtime has no C code it won't
+# even be necessary.
+# [ "$CGO_ENABLED" != 1 ] || [ "$GOOS" == darwin ] ||
+# (xcd ../misc/cgo/testcdefs
+# ./test.bash || exit 1
+# ) || exit $?
+
 [ "$CGO_ENABLED" != 1 ] || [ "$GOOS" == darwin ] ||
-(xcd ../misc/cgo/testcdefs
+(xcd ../misc/cgo/testgodefs
 ./test.bash || exit 1
 ) || exit $?
 
@@ -184,16 +199,19 @@ go run main.go || exit 1
 ) || exit $?
 
 [ "$GOOS" == nacl ] ||
+[ "$GOOS" == android ] ||
 (xcd ../doc/progs
 time ./run || exit 1
 ) || exit $?
 
+[ "$GOOS" == android ] ||
 [ "$GOOS" == nacl ] ||
 [ "$GOARCH" == arm ] ||  # uses network, fails under QEMU
 (xcd ../doc/articles/wiki
 ./test.bash || exit 1
 ) || exit $?
 
+[ "$GOOS" == android ] ||
 [ "$GOOS" == nacl ] ||
 (xcd ../doc/codewalk
 time ./run || exit 1
@@ -205,6 +223,7 @@ time ./run || exit 1
 time ./timing.sh -test || exit 1
 ) || exit $?
 
+[ "$GOOS" == android ] || # TODO(crawshaw): get this working
 [ "$GOOS" == openbsd ] || # golang.org/issue/5057
 (
 echo
@@ -212,6 +231,7 @@ echo '#' ../test/bench/go1
 go test ../test/bench/go1 || exit 1
 ) || exit $?
 
+[ "$GOOS" == android ] ||
 (xcd ../test
 unset GOMAXPROCS
 GOOS=$GOHOSTOS GOARCH=$GOHOSTARCH go build -o runtest run.go || exit 1
@@ -219,6 +239,7 @@ time ./runtest || exit 1
 rm -f runtest
 ) || exit $?
 
+[ "$GOOS" == android ] ||
 [ "$GOOS" == nacl ] ||
 (
 echo

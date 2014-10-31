@@ -234,9 +234,9 @@ Description:
 	&lt;enter description here&gt;
 
 Files:
-	src/pkg/math/sin.go
-	src/pkg/math/tan.go
-	src/pkg/regexp/regexp.go
+	src/math/sin.go
+	src/math/tan.go
+	src/regexp/regexp.go
 </pre>
 
 <p>
@@ -287,8 +287,8 @@ Description:
 	Fixes issue 159.
 
 Files:
-	src/pkg/math/sin.go
-	src/pkg/math/tan.go
+	src/math/sin.go
+	src/math/tan.go
 </pre>
 
 <p>
@@ -311,127 +311,6 @@ which <code>hg change</code> will print, something like:
 <pre>
 CL created: https://codereview.appspot.com/99999
 </pre>
-
-<h3>Adding or removing files from an existing change</h3>
-
-<p>
-If you need to re-edit the change description, or change the files included in the CL,
-run <code>hg change 99999</code>.
-</p>
-
-<p>
-Alternatively, you can use
-</p>
-
-<pre>
-$ hg file 99999 somefile
-</pre>
-
-<p>
-to add <code>somefile</code> to CL 99999, and
-</p>
-
-<pre>
-$ hg file -d 99999 somefile
-</pre>
-
-<p>
-to remove <code>somefile</code> from the CL.
-</p>
-
-<p>
-A file may only belong to a single active CL at a time. <code>hg file</code>
-will issue a warning if a file is moved between changes.
-</p>
-
-<h3>Synchronize your client</h3>
-
-<p>While you were working, others might have submitted changes
-to the repository.  To update your client, run</p>
-
-<pre>
-$ hg sync
-</pre>
-
-<p>(For Mercurial fans, <code>hg sync</code> runs <code>hg pull -u</code>
-but then also synchronizes the local change list state against the new data.)</p>
-
-<p>
-If files you were editing have changed, Mercurial does its best to merge the
-remote changes into your local changes.  It may leave some files to merge by hand.
-</p>
-
-<p>
-For example, suppose you have edited <code>flag_test.go</code> but
-someone else has committed an independent change.
-When you run <code>hg sync</code>, you will get the (scary-looking) output
-(emphasis added):
-
-<pre>
-$ hg sync
-adding changesets
-adding manifests
-adding file changes
-added 1 changeset with 2 changes to 2 files
-getting src/pkg/flag/flag.go
-couldn't find merge tool hgmerge
-merging src/pkg/flag/flag_test.go
-warning: conflicts during merge.
-<i>merging src/pkg/flag/flag_test.go failed!</i>
-1 file updated, 0 files merged, 0 files removed, 1 file unresolved
-use 'hg resolve' to retry unresolved file merges
-$
-</pre>
-
-<p>
-The only important part in that transcript is the italicized line:
-Mercurial failed to merge your changes with the independent change.
-When this happens, Mercurial leaves both edits in the file,
-marked by <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> and
-<code>&gt;&gt;&gt;&gt;&gt;&gt;&gt;</code>.
-it is now your job to edit the file to combine them.
-Continuing the example, searching for those strings in <code>flag_test.go</code>
-might turn up:
-</p>
-
-<pre>
-	VisitAll(visitor);
-&lt;&lt;&lt;&lt;&lt;&lt;&lt; local
-	if len(m) != 7 {
-=======
-	if len(m) != 8 {
-&gt;&gt;&gt;&gt;&gt;&gt;&gt; other
-		t.Error("VisitAll misses some flags");
-</pre>
-
-<p>
-Mercurial doesn't show it, but suppose the original text that both edits
-started with was 6; you added 1 and the other change added 2,
-so the correct answer might now be 9.  First, edit the section
-to remove the markers and leave the correct code:
-</p>
-
-<pre>
-	VisitAll(visitor);
-	if len(m) != 9 {
-		t.Error("VisitAll misses some flags");
-</pre>
-
-<p>
-Then ask Mercurial to mark the conflict as resolved:
-</p>
-
-<pre>
-$ hg resolve -m flag_test.go
-</pre>
-
-<p>
-If you had been editing the file, say for debugging, but do not
-care to preserve your changes, you can run
-<code>hg revert flag_test.go</code> to abandon your
-changes, but you may still need to run
-<code>hg resolve -m</code> to mark the conflict resolved.
-</p>
 
 <h3>Mail the change for review</h3>
 
@@ -515,6 +394,127 @@ The reviewer approves the change by replying with a mail that says
 
 <p>
 You can see a list of your pending changes by running <code>hg pending</code> (<code>hg p</code> for short).
+</p>
+
+<h3>Adding or removing files from an existing change</h3>
+
+<p>
+If you need to re-edit the change description, or change the files included in the CL,
+run <code>hg change 99999</code>.
+</p>
+
+<p>
+Alternatively, you can use
+</p>
+
+<pre>
+$ hg file 99999 somefile
+</pre>
+
+<p>
+to add <code>somefile</code> to CL 99999, and
+</p>
+
+<pre>
+$ hg file -d 99999 somefile
+</pre>
+
+<p>
+to remove <code>somefile</code> from the CL.
+</p>
+
+<p>
+A file may only belong to a single active CL at a time. <code>hg file</code>
+will issue a warning if a file is moved between changes.
+</p>
+
+<h3>Synchronize your client</h3>
+
+<p>While you were working, others might have submitted changes
+to the repository.  To update your client, run</p>
+
+<pre>
+$ hg sync
+</pre>
+
+<p>(For Mercurial fans, <code>hg sync</code> runs <code>hg pull -u</code>
+but then also synchronizes the local change list state against the new data.)</p>
+
+<p>
+If files you were editing have changed, Mercurial does its best to merge the
+remote changes into your local changes.  It may leave some files to merge by hand.
+</p>
+
+<p>
+For example, suppose you have edited <code>flag_test.go</code> but
+someone else has committed an independent change.
+When you run <code>hg sync</code>, you will get the (scary-looking) output
+(emphasis added):
+
+<pre>
+$ hg sync
+adding changesets
+adding manifests
+adding file changes
+added 1 changeset with 2 changes to 2 files
+getting src/flag/flag.go
+couldn't find merge tool hgmerge
+merging src/flag/flag_test.go
+warning: conflicts during merge.
+<i>merging src/flag/flag_test.go failed!</i>
+1 file updated, 0 files merged, 0 files removed, 1 file unresolved
+use 'hg resolve' to retry unresolved file merges
+$
+</pre>
+
+<p>
+The only important part in that transcript is the italicized line:
+Mercurial failed to merge your changes with the independent change.
+When this happens, Mercurial leaves both edits in the file,
+marked by <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> and
+<code>&gt;&gt;&gt;&gt;&gt;&gt;&gt;</code>.
+It is now your job to edit the file to combine them.
+Continuing the example, searching for those strings in <code>flag_test.go</code>
+might turn up:
+</p>
+
+<pre>
+	VisitAll(visitor);
+&lt;&lt;&lt;&lt;&lt;&lt;&lt; local
+	if len(m) != 7 {
+=======
+	if len(m) != 8 {
+&gt;&gt;&gt;&gt;&gt;&gt;&gt; other
+		t.Error("VisitAll misses some flags");
+</pre>
+
+<p>
+Mercurial doesn't show it, but suppose the original text that both edits
+started with was 6; you added 1 and the other change added 2,
+so the correct answer might now be 9.  First, edit the section
+to remove the markers and leave the correct code:
+</p>
+
+<pre>
+	VisitAll(visitor);
+	if len(m) != 9 {
+		t.Error("VisitAll misses some flags");
+</pre>
+
+<p>
+Then ask Mercurial to mark the conflict as resolved:
+</p>
+
+<pre>
+$ hg resolve -m flag_test.go
+</pre>
+
+<p>
+If you had been editing the file, say for debugging, but do not
+care to preserve your changes, you can run
+<code>hg revert flag_test.go</code> to abandon your
+changes, but you may still need to run
+<code>hg resolve -m</code> to mark the conflict resolved.
 </p>
 
 <h3>Reviewing code by others</h3>
